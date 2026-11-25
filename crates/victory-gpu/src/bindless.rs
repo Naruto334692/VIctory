@@ -245,16 +245,14 @@ impl Uploads {
 /// (in the submission's batch of refreshes): the pages the title changed
 /// since their copies took them.
 ///
-/// shortcut: what shaders write through the heap's unordered access views
-/// stays in the host copies (later draws read it there) and does not go
-/// back to title memory, so the CPU does not see it, and a page the title
-/// also writes is copied over from title memory, losing the GPU's bytes
-/// there. Copying back the whole unordered ranges after every submission
-/// (about 1 GB of them in the world) cost seconds per frame; the upgrade
-/// is shaders marking the pages they write (as `crate::memory` does).
-pub(crate) fn refresh(viewed: &Viewed, mut add: impl FnMut(&Arc<Shadow>, usize, usize)) {
-    for (shadow, address, len, _) in viewed.ranges() {
-        add(&shadow, address as usize, len as usize);
+/// Heap UAV ranges are passed to the submission as writes as well as
+/// refreshes: the host arms their marked pages before the GPU runs, so a
+/// title write to the same 64 KiB page keeps its pre-write bytes for
+/// `Shadow::copy_back_marked`. The callback receives whether each merged
+/// range is an unordered-access range.
+pub(crate) fn refresh(viewed: &Viewed, mut add: impl FnMut(&Arc<Shadow>, usize, usize, bool)) {
+    for (shadow, address, len, uav) in viewed.ranges() {
+        add(&shadow, address as usize, len as usize, uav);
     }
 }
 
@@ -508,13 +506,12 @@ void main(uint3 id : SV_DispatchThreadID) {
     /// The title writes a buffer and a texture, and views of them and of an
     /// output buffer into its heap; a shader reaching them only through the
     /// heap (no table entry names them) reads what the title wrote at
-    /// submission, every round (the title rewrites both each time, as Bink
-    /// rewrites its planes every frame). The output buffer is not read back
-    /// into title memory (`refresh`'s shortcut): it is read from its host
-    /// copy.
+    /// submission, every round. The test's native shader has no VIctory
+    /// write-mark table, so its heap UAV must use the snapshot fallback and
+    /// preserve a deferred title write outside the shader's write span.
     #[test]
     fn heap_views_are_current() {
-        let (src, dst) = (resource(1, 256, 1, 0, 1), resource(1, 256, 1, 0, 1));
+        let (src, dst) = (resource(1, 256, 1, 0, 1), resource(1, 512, 1, 0, 1));
         let tex = resource(3, 4, 1, 28, LINEAR);
         let write = |base: u32, texel: u8| {
             let (src_bytes, _) = crate::resource::buffer_bytes(src).unwrap();
@@ -537,10 +534,10 @@ void main(uint3 id : SV_DispatchThreadID) {
     /// heaps through a pool view): every round must reach the shader.
     #[test]
     fn heap_views_follow_writes_through_another_mapping() {
-        let (a, b) = crate::watch::tests::twin_views(2);
+        let (a, b) = crate::watch::tests::twin_views(3);
         let src = resource_at(a, 1, 256, 1, 0, 1);
         let tex = resource_at(a + PAGE_BYTES, 3, 4, 1, 28, LINEAR);
-        let dst = resource(1, 256, 1, 0, 1);
+        let dst = resource_at(a + 2 * PAGE_BYTES, 1, 512, 1, 0, 1);
         let (_, tex_desc) = crate::resource::texture_memory(tex).unwrap();
         let size = crate::resource::texture_layout(&tex_desc).unwrap().planes[0].layout.size as usize;
         let write = |base: u32, texel: u8| {
@@ -578,10 +575,10 @@ void main(uint3 id : SV_DispatchThreadID) {
         assert_eq!(crate::descriptor::create_heap(null, heap_desc.as_ptr().cast(), &iid, &mut heap), S_OK);
         let title_heap = crate::descriptor::heap(heap);
         let slot = |i: u64| title_heap.start + 32 * i;
-        // Raw views of 64 dwords: format R32_TYPELESS, buffer dimension,
-        // the default mapping, then first element, count, stride, flags.
+        // The shader reads 64 dwords and writes the first 64 of a 128-dword
+        // UAV view, leaving dword 100 untouched for the CPU-write check.
         let srv: [u32; 10] = [39, 1, 0x1688, 0, 0, 0, 64, 0, 1, 0];
-        let uav: [u32; 10] = [39, 1, 0, 0, 64, 0, 0, 0, 1, 0];
+        let uav: [u32; 10] = [39, 1, 0, 0, 128, 0, 0, 0, 1, 0];
         crate::descriptor::create_srv(null, src, &srv, slot(0));
         crate::descriptor::create_uav(null, dst, null, &uav, slot(1));
         crate::descriptor::create_srv(null, tex, std::ptr::null(), slot(2));
@@ -589,7 +586,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         let (root, pso) = compile();
         let list = host.new_list().unwrap();
         let (dst_bytes, _) = crate::resource::buffer_bytes(dst).unwrap();
-        let out = crate::shadow::find(dst_bytes as u64, 256).expect("the output's host copy");
+        let out = crate::shadow::find(dst_bytes as u64, 512).expect("the output's host copy");
         for (round, (base, texel)) in [(1000u32, 0x40u8), (5000, 0x10), (9000, 0x22)].into_iter().enumerate() {
             if round > 0 {
                 list.reset();
@@ -602,15 +599,62 @@ void main(uint3 id : SV_DispatchThreadID) {
                 list.list.SetPipelineState(&pso);
                 list.list.Dispatch(4, 1, 1);
             }
-            list.defer_heap(&heap_host.viewed);
+            // This native D3DCompile shader does not carry VIctory's injected
+            // write-mark table; require the byte-snapshot fallback.
+            list.defer_heap(&heap_host.viewed, true, false);
+            // Run after the heap's refresh/arming, but before the GPU list:
+            // emulate a title thread changing one DWORD on the same page.
+            let cpu_write_at = dst_bytes as usize + 100 * std::mem::size_of::<u32>();
+            let cpu_write_value = 0xC0DE_0000 | round as u32;
+            list.defer(move || {
+                let _writing = crate::watch::writing(cpu_write_at, std::mem::size_of::<u32>());
+                // SAFETY: the destination buffer belongs to this test.
+                unsafe { (cpu_write_at as *mut u32).write_volatile(cpu_write_value) };
+            });
             list.close();
-            // The title writes after recording, before submitting.
+            // The title writes its SRV and texture after recording, before submitting.
             write(base, texel);
             host.execute(&[&list]);
-            let words = out.read_host(dst_bytes as u64, 64);
-            for (i, &v) in words.iter().enumerate() {
-                assert_eq!(v, base + i as u32 + u32::from(texel), "round {round}, dword {i}");
+            let words = out.read_host(dst_bytes as u64, 128);
+            // SAFETY: the GPU fence has completed; this test owns the
+            // destination's 512-byte title-memory allocation.
+            let title_words = unsafe { std::slice::from_raw_parts(dst_bytes.cast_const().cast::<u32>(), 128) };
+            for (i, &v) in words.iter().enumerate().take(64) {
+                let expected = base + i as u32 + u32::from(texel);
+                assert_eq!(v, expected, "round {round}, host GPU dword {i}");
+                assert_eq!(title_words[i], expected, "round {round}, title GPU dword {i}");
             }
+            assert_eq!(words[100], cpu_write_value, "round {round}, host CPU-only dword survives");
+            assert_eq!(title_words[100], cpu_write_value, "round {round}, title CPU-only dword survives on the same page");
         }
+    }
+    /// The heap registry must preserve whether a merged host-copy range
+    /// is SRV or UAV: only UAV ranges are declared as GPU writes and armed
+    /// before marked-page copy-back.
+    #[test]
+    fn refresh_reports_buffer_view_access_kind() {
+        const PAGE: usize = crate::watch::PAGE;
+        let p = crate::watch::tests::pool(2);
+        crate::shadow::register(p, p as u64, (2 * PAGE) as u64);
+        let Some(copy) = crate::shadow::find(p as u64, (2 * PAGE) as u64) else {
+            crate::shadow::unregister(p, p as u64);
+            crate::watch::tests::free(p);
+            return; // no host GPU here
+        };
+        let viewed = Viewed::default();
+        {
+            let mut inner = viewed.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.count(&Seen::Buffer(copy.clone(), p as u64, PAGE as u64, false), true);
+            inner.count(&Seen::Buffer(copy.clone(), (p + PAGE) as u64, PAGE as u64, true), true);
+        }
+        let mut kinds = Vec::new();
+        refresh(&viewed, |_shadow, _address, _len, uav| kinds.push(uav));
+        assert_eq!(kinds.len(), 2);
+        assert!(kinds.contains(&false), "the SRV range remains a read");
+        assert!(kinds.contains(&true), "the UAV range remains a write");
+        drop(viewed);
+        crate::shadow::unregister(p, p as u64);
+        drop(copy);
+        crate::watch::tests::free(p);
     }
 }
