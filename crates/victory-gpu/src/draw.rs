@@ -187,10 +187,33 @@ pub(crate) fn dispatched() -> u64 {
 /// other views as 1 MiB (both cut at their buffer's end).
 fn root_view(list: &HostList, address: u64, srv: bool, uav: bool) -> Option<u64> {
     let shadow = crate::shadow::find(address, 1)?;
-    let len = shadow
-        .left(address)
-        .min(if srv || uav { 1 << 20 } else { 1 << 16 });
+    let available = shadow.left(address);
+    let len = available.min(if srv || uav { 1 << 20 } else { 1 << 16 });
     let gpu = shadow.gpu(address);
+    // Root SRV/UAV descriptors carry only a GPU virtual address: unlike a
+    // descriptor-heap buffer view, D3D12 receives no byte length to enforce.
+    // Trace the copied extent and the shorter range refreshed for this bind
+    // so DRED faults can be correlated with the exact root-view binding.
+    #[cfg(feature = "diagnostics")]
+    {
+        static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        static LOGGED: AtomicU64 = AtomicU64::new(0);
+        if *TRACE.get_or_init(|| {
+            std::env::var_os("VICTORY_TRACE_ROOT_VIEWS").is_some()
+        }) && LOGGED.fetch_add(1, Ordering::Relaxed) < 1_000
+        {
+            tracing::info!(
+                target: "victory_gpu::root_view",
+                address,
+                gpu,
+                srv,
+                uav,
+                available,
+                refreshed = len,
+                "root GPU-VA descriptor extent (hardware descriptor has no size)"
+            );
+        }
+    }
     if srv || uav || gpu % 256 == 0 {
         shadow.refresh(list, address, len);
         if uav {
