@@ -859,7 +859,8 @@ impl State {
                 offset,
                 available,
                 refreshed = available,
-                view_bytes = copy_bytes & !3,
+                view_bytes,
+                view_remaining,
                 writeback,
                 marked,
                 "bounded translated root GPU-VA view extent"
