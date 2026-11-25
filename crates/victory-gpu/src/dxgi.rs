@@ -215,6 +215,7 @@ static FACTORY_FUNCTIONS: Table<32> = {
 
 /// A display mode as the console lists it: size, refresh rate (numerator,
 /// denominator), format, scanline order, scaling, flags.
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct Mode {
     width: u32,
