@@ -75,6 +75,33 @@ if ($PackageZip) {
     } finally {
         $archive.Dispose()
     }
+
+    # Extract only the generated runtime package into a temporary folder and
+    # invoke the launcher with an intentionally missing GameDir. The expected
+    # error proves the launcher found victory.exe in the package root first.
+    $smokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) "victory-package-smoke-$PID"
+    if (Test-Path -LiteralPath $smokeRoot) {
+        Remove-Item -LiteralPath $smokeRoot -Recurse -Force
+    }
+    try {
+        [System.IO.Compression.ZipFile]::ExtractToDirectory((Resolve-Path -LiteralPath $PackageZip).Path, $smokeRoot)
+        $launcher = Join-Path $smokeRoot "scripts\Run-VIctory.ps1"
+        $missingGame = Join-Path $smokeRoot "missing-game"
+        $launcherError = $null
+        try {
+            & $launcher -GameDir $missingGame -GameExe "missing.exe" | Out-Null
+        } catch {
+            $launcherError = $_.Exception.Message
+        }
+        if ($launcherError -notlike "*Game directory does not exist*") {
+            throw "Launcher package-layout smoke test failed. Expected missing GameDir error, got: $launcherError"
+        }
+    } finally {
+        if (Test-Path -LiteralPath $smokeRoot) {
+            Remove-Item -LiteralPath $smokeRoot -Recurse -Force
+        }
+    }
+    Write-Host "Launcher package-layout smoke test: ok"
     Write-Host "Package contents: ok"
 }
 
