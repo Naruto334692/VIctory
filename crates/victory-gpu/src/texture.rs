@@ -374,6 +374,8 @@ impl Staging {
                 self.layout
                     .detile(tiled, mip, slice, linear, pitch, pitch * rows as usize)
             {
+                #[cfg(feature = "diagnostics")]
+                crate::copystat::add(crate::copystat::C::TexDetileFailures, 1);
                 tracing::warn!(?e, mip, slice, "texture not detiled; staging upload withheld");
                 return false;
             }
