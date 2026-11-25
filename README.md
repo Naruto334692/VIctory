@@ -97,6 +97,13 @@ and point `VICTORY_FIDELITYFX_DIR` (or `[paths].fidelityfx_dir`) at its
 `amd_fidelityfx_upscaler_dx12.dll`. Without it, or if that DLL offers no
 upscaler for your GPU (the log says so), the title's own DLLs run.
 
+The existing FidelityFX bridge can serve the title's FSR upscaler from a
+user-provided PC FidelityFX SDK DLL; the title controls the requested FSR
+mode. VIctory does not yet expose manual FSR quality controls. NVIDIA DLSS
+is not implemented yet: it requires a separate NGX/Streamline backend and
+a reliable D3D12 render-frame hook. See
+[FSR/DLSS integration status and requirements](docs/upscaling-fsr-dlss.md).
+
 The DXGI output-mode list offers 1920x1080, 2560x1440 and 3840x2160 at
 60 Hz. This is mode enumeration, not a forced internal render resolution;
 the title may keep its own render-target size. A 60 FPS target is not yet
