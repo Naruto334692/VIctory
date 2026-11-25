@@ -21,7 +21,11 @@ foreach ($relativePath in @("scripts/Build-Windows-Package.ps1", "scripts/Run-VI
         throw "PowerShell syntax errors in $relativePath : $details"
     }
 }
-Write-Host "PowerShell syntax: ok"
+$launcherSource = Get-Content -LiteralPath (Join-Path $repoRoot "scripts\Run-VIctory.ps1") -Raw
+if ($launcherSource -notmatch '\$runtime\s*=\s*Join-Path\s+\(Split-Path\s+-Parent\s+\$PSScriptRoot\)\s+"victory\.exe"') {
+    throw "Launcher must resolve victory.exe from the package root, one directory above scripts."
+}
+Write-Host "PowerShell syntax and package-relative launcher path: ok"
 
 # The runtime CLI can be smoke-tested without proprietary game files.
 if ($BinaryPath) {
