@@ -115,6 +115,11 @@ pub(crate) fn take_root_view_slots() -> u64 {
 }
 static ROOT_VIEW_SLOTS: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(feature = "diagnostics")]
+static ROOT_VIEW_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+#[cfg(feature = "diagnostics")]
+static ROOT_VIEW_TRACE_COUNT: AtomicU64 = AtomicU64::new(0);
+
 /// Draws recorded on the host GPU since the last frame line.
 static DRAWN: AtomicU64 = AtomicU64::new(0);
 
@@ -187,10 +192,33 @@ pub(crate) fn dispatched() -> u64 {
 /// other views as 1 MiB (both cut at their buffer's end).
 fn root_view(list: &HostList, address: u64, srv: bool, uav: bool) -> Option<u64> {
     let shadow = crate::shadow::find(address, 1)?;
-    let len = shadow
-        .left(address)
-        .min(if srv || uav { 1 << 20 } else { 1 << 16 });
+    let available = shadow.left(address);
+    let len = available.min(if srv || uav { 1 << 20 } else { 1 << 16 });
     let gpu = shadow.gpu(address);
+    // Root SRV/UAV descriptors carry only a GPU virtual address: unlike a
+    // descriptor-heap buffer view, D3D12 receives no byte length to enforce.
+    // Trace the copied extent and the shorter range refreshed for this bind
+    // so DRED faults can be correlated with the exact root-view binding.
+    #[cfg(feature = "diagnostics")]
+    {
+        if (srv || uav || gpu % 256 == 0)
+            && *ROOT_VIEW_TRACE.get_or_init(|| {
+                std::env::var_os("VICTORY_TRACE_ROOT_VIEWS").is_some()
+            })
+            && ROOT_VIEW_TRACE_COUNT.fetch_add(1, Ordering::Relaxed) < 1_000
+        {
+            tracing::info!(
+                target: "victory_gpu::root_view",
+                address,
+                gpu,
+                srv,
+                uav,
+                available,
+                refreshed = len,
+                "root GPU-VA descriptor extent (hardware descriptor has no size)"
+            );
+        }
+    }
     if srv || uav || gpu % 256 == 0 {
         shadow.refresh(list, address, len);
         if uav {
@@ -794,12 +822,55 @@ impl State {
         };
         let shadow = crate::shadow::find(address, 1)?;
         let offset = u32::try_from(shadow.offset(address)).ok()?;
-        shadow.refresh(list, address, shadow.left(address));
+        let available = shadow.left(address);
+        #[cfg(feature = "diagnostics")]
+        let (copy_start, copy_bytes) = shadow.range();
+        // D3D12 raw buffer views are capped at 2^27 DWORD elements by
+        // HostHeap::raw_view_at; log the actual descriptor extent, not the
+        // potentially larger backing allocation.
+        #[cfg(feature = "diagnostics")]
+        let view_bytes = (copy_bytes / 4).clamp(1, 1 << 27) * 4;
+        #[cfg(feature = "diagnostics")]
+        let view_remaining = view_bytes.saturating_sub(u64::from(offset));
+        let marked = shadow.marked();
+        let writeback = if uav {
+            if marked { available } else { available.min(1 << 20) }
+        } else {
+            0
+        };
+        // This is the translated/bounded path used by shaders which do not
+        // access title memory through the page table. The descriptor spans
+        // the whole host copy; the shader adds the offset and D3D12 bounds the
+        // access to the descriptor's NumElements.
+        #[cfg(feature = "diagnostics")]
+        if *ROOT_VIEW_TRACE.get_or_init(|| {
+            std::env::var_os("VICTORY_TRACE_ROOT_VIEWS").is_some()
+        }) && ROOT_VIEW_TRACE_COUNT.fetch_add(1, Ordering::Relaxed) < 1_000
+        {
+            tracing::info!(
+                target: "victory_gpu::root_view",
+                address,
+                host_gpu_address = shadow.gpu(address),
+                host_gpu_base = shadow.gpu(copy_start),
+                srv = !uav,
+                uav,
+                copy_start,
+                copy_bytes,
+                offset,
+                available,
+                refreshed = available,
+                view_bytes,
+                view_remaining,
+                writeback,
+                marked,
+                "bounded translated root GPU-VA view extent"
+            );
+        }
+        shadow.refresh(list, address, available);
         if uav {
             // Writes through the view are marked wherever they land in the
             // copy; else declared for 1 MiB.
-            let len = if shadow.marked() { shadow.left(address) } else { shadow.left(address).min(1 << 20) };
-            shadow.gpu_writes(list, address, len, true);
+            shadow.gpu_writes(list, address, writeback, true);
         }
         let (key, host) = match self.heaps[0] {
             0 => (MEMORY_HEAP, crate::memory::heap()?),
