@@ -4,6 +4,7 @@
 //! shortcut: every submission is waited for, so CPU and GPU never overlap;
 //! overlap them with per-submission fences once more than clears run.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -2445,6 +2446,9 @@ struct Presenter {
 /// every few seconds.
 struct Meter {
     since: std::time::Instant,
+    last_frame: Instant,
+    /// Bounded rolling sample of presented-frame intervals (milliseconds).
+    frame_times_ms: VecDeque<f64>,
     frames: u32,
     #[cfg(feature = "diagnostics")]
     copy_stats_frames: u64,
@@ -2459,6 +2463,8 @@ impl Meter {
         let now = std::time::Instant::now();
         Meter {
             since: now,
+            last_frame: now,
+            frame_times_ms: VecDeque::with_capacity(600),
             frames: 0,
             #[cfg(feature = "diagnostics")]
             copy_stats_frames: 0,
@@ -2472,6 +2478,15 @@ impl Meter {
     fn frame(&mut self, hwnd: HWND) {
         #[cfg(feature = "diagnostics")]
         tracing::debug!(target: "victory_gpu::frame", token = crate::frame::current(), "present");
+        let frame_now = Instant::now();
+        let frame_ms = frame_now.duration_since(self.last_frame).as_secs_f64() * 1000.0;
+        self.last_frame = frame_now;
+        if frame_ms.is_finite() && frame_ms >= 0.0 {
+            if self.frame_times_ms.len() == 600 {
+                self.frame_times_ms.pop_front();
+            }
+            self.frame_times_ms.push_back(frame_ms);
+        }
         self.frames += 1;
         crate::memory::log_frame();
         #[cfg(feature = "diagnostics")]
@@ -2509,12 +2524,16 @@ impl Meter {
         let drops = crate::pipeline::take_drops();
         if self.logged.elapsed() >= std::time::Duration::from_secs(5) {
             self.logged = std::time::Instant::now();
+            let frame_samples: Vec<_> = self.frame_times_ms.iter().copied().collect();
+            let p95 = percentile_ms(&frame_samples, 95.0).unwrap_or(0.0);
+            let p99 = percentile_ms(&frame_samples, 99.0).unwrap_or(0.0);
             tracing::info!(
-                "{fps:.1} fps, {ms:.1} ms/frame ({cpu:.1} preparing: copies {copy_ms:.1} ms \
+                "{fps:.1} fps, {ms:.1} ms/frame, frame-time rolling p95 {p95:.2} ms / p99 {p99:.2} ms (last {} presents); ({cpu:.1} preparing: copies {copy_ms:.1} ms \
                  {copy_mb:.1} MB, textures {texture_ms:.1} ms {texture_mb:.1} MB; {gpu:.1} on the \
                  GPU; {back_ms:.1} copying back {back_mb:.1} MB), {draws:.0} draws/frame, \
                  dropped {dropped:.0} without a host pipeline ({making} being made) and \
                  {indirect:.0} indirect; {root_views:.0} root-view slots/frame",
+                frame_samples.len(),
                 making = crate::pipeline::making()
             );
             let (textures, bytes, used, shared, saved, replaced) = crate::resource::texture_counts();
@@ -2575,6 +2594,36 @@ impl Meter {
                     }
                 });
         });
+    }
+}
+
+
+/// Nearest-rank percentile of a small, bounded frame-time sample.
+fn percentile_ms(samples: &[f64], percentile: f64) -> Option<f64> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let fraction = (percentile.clamp(0.0, 100.0) / 100.0).max(1.0 / sorted.len() as f64);
+    let index = (fraction * sorted.len() as f64).ceil() as usize - 1;
+    sorted.get(index).copied()
+}
+
+
+#[cfg(test)]
+mod frame_time_tests {
+    use super::percentile_ms;
+
+    #[test]
+    fn frame_time_percentiles_use_nearest_rank_and_handle_empty_samples() {
+        assert_eq!(percentile_ms(&[], 95.0), None);
+        let samples = [1.0, 2.0, 3.0, 4.0, 100.0];
+        assert_eq!(percentile_ms(&samples, 0.0), Some(1.0));
+        assert_eq!(percentile_ms(&samples, 50.0), Some(3.0));
+        assert_eq!(percentile_ms(&samples, 95.0), Some(100.0));
+        assert_eq!(percentile_ms(&samples, 99.0), Some(100.0));
+        assert_eq!(percentile_ms(&samples, 100.0), Some(100.0));
     }
 }
 
