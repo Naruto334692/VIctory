@@ -534,7 +534,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     /// heaps through a pool view): every round must reach the shader.
     #[test]
     fn heap_views_follow_writes_through_another_mapping() {
-        let (a, b) = crate::watch::tests::twin_views(2);
+        let (a, b) = crate::watch::tests::twin_views(3);
         let src = resource_at(a, 1, 256, 1, 0, 1);
         let tex = resource_at(a + PAGE_BYTES, 3, 4, 1, 28, LINEAR);
         let dst = resource_at(a + 2 * PAGE_BYTES, 1, 256, 1, 0, 1);
