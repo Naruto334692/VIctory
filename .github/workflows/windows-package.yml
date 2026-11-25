@@ -28,15 +28,19 @@ jobs:
         run: rustup toolchain install
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
+      - name: Parse PowerShell scripts
+        shell: pwsh
+        run: .\scripts\Test-Windows-Package.ps1
       - name: Check repository asset policy
         run: cargo xtask policy
       - name: Run workspace tests
         run: cargo test --workspace --locked
-      - name: Build release executable
-        run: cargo build --release -p victory --locked
-      - name: Create portable runtime ZIP
+      - name: Build and package release runtime
         run: .\scripts\Build-Windows-Package.ps1 -SkipTests
-      - name: Verify ZIP and write checksum
+      - name: Smoke-test CLI and verify ZIP contents
+        shell: pwsh
+        run: .\scripts\Test-Windows-Package.ps1 -BinaryPath .\target\release\victory.exe -PackageZip .\out\VIctory-Windows-x64.zip
+      - name: Write SHA-256 checksum
         shell: pwsh
         run: |
           $zip = 'out/VIctory-Windows-x64.zip'
