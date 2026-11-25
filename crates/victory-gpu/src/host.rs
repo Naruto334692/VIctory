@@ -3012,17 +3012,24 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
         deferred.defer_heap(&viewed, false);
         deferred.defer_heap(&viewed, true);
         assert_eq!(deferred.copies.len(), 1, "one step in an epoch");
-        assert!(matches!(&deferred.copies[0], Step::Heap(heap, true) if Arc::ptr_eq(heap, &viewed)));
+        let first_journal = match &deferred.copies[0] {
+            Step::Heap(heap, true, journal) if Arc::ptr_eq(heap, &viewed) => journal.clone(),
+            _ => panic!("first epoch records a writing heap step"),
+        };
         deferred.end_refresh_epoch();
         deferred.defer_heap(&viewed, false);
         deferred.defer_heap(&viewed, false);
         assert_eq!(deferred.copies.len(), 2, "barrier starts another epoch");
-        assert!(matches!(&deferred.copies[0], Step::Heap(heap, true) if Arc::ptr_eq(heap, &viewed)));
-        assert!(matches!(&deferred.copies[1], Step::Heap(heap, false) if Arc::ptr_eq(heap, &viewed)));
+        assert!(matches!(&deferred.copies[0], Step::Heap(heap, true, _) if Arc::ptr_eq(heap, &viewed)));
+        let second_journal = match &deferred.copies[1] {
+            Step::Heap(heap, false, journal) if Arc::ptr_eq(heap, &viewed) => journal.clone(),
+            _ => panic!("second epoch records a read-only heap step"),
+        };
+        assert!(!Arc::ptr_eq(&first_journal, &second_journal), "write journals are isolated per epoch/list step");
         deferred.end_refresh_epoch();
         deferred.defer_heap(&viewed, true);
         assert_eq!(deferred.copies.len(), 3);
-        assert!(matches!(&deferred.copies[2], Step::Heap(heap, true) if Arc::ptr_eq(heap, &viewed)));
+        assert!(matches!(&deferred.copies[2], Step::Heap(heap, true, _) if Arc::ptr_eq(heap, &viewed)));
     }
     #[test]
     fn a_texture_is_checked_once_per_submission() {
