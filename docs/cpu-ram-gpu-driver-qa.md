@@ -187,3 +187,21 @@ second driver version.
   sustained gameplay remain unverified.
 - No automatic device recreation is claimed. On device loss, a diagnostic
   crash report and clean termination are safer than reusing invalid objects.
+
+
+## Official vendor and Microsoft references
+
+- AMD Cleanup Utility and its recommended Safe Mode workflow:
+  https://www.amd.com/en/resources/support-articles/faqs/GPU-601.html
+- AMD stability troubleshooting, including clean installation, reverting to a previously stable driver, RAM checks and hardware connections:
+  https://www.amd.com/en/resources/support-articles/faqs/TS-TIPS.html
+- NVIDIA's manual clean driver installation procedure:
+  https://nvidia.custhelp.com/app/answers/detail/a_id/10
+- Microsoft DRED guidance for GPU page faults, auto-breadcrumbs and device-removal diagnostics:
+  https://learn.microsoft.com/en-us/windows/win32/direct3d12/use-dred
+- Microsoft TDR behavior and the requirement for applications to recreate the D3D device and its objects after a successful reset:
+  https://learn.microsoft.com/en-us/windows-hardware/drivers/display/timeout-detection-and-recovery
+- Microsoft DirectX dump files for postmortem GPU hang analysis:
+  https://learn.microsoft.com/en-us/windows/pix/directx-dump-files/overview
+
+Driver cleanup is a user-side troubleshooting operation, not a runtime workaround. Use the vendor utility only when evidence points to a corrupted/conflicting installation, and save a restore point or recovery path first.
