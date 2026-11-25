@@ -1,0 +1,57 @@
+name: Windows runtime package
+
+on:
+  push:
+    branches:
+      - windows/pc-runtime-package
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-package-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: Build and package Windows x64 runtime
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+      - name: Parse PowerShell scripts
+        shell: pwsh
+        run: .\scripts\Test-Windows-Package.ps1
+      - name: Check repository asset policy
+        run: cargo xtask policy
+      - name: Run workspace tests
+        run: cargo test --workspace --locked
+      - name: Build and package release runtime
+        run: .\scripts\Build-Windows-Package.ps1 -SkipTests
+      - name: Smoke-test CLI and verify ZIP contents
+        shell: pwsh
+        run: .\scripts\Test-Windows-Package.ps1 -BinaryPath .\target\release\victory.exe -PackageZip .\out\VIctory-Windows-x64.zip
+      - name: Write SHA-256 checksum
+        shell: pwsh
+        run: |
+          $zip = 'out/VIctory-Windows-x64.zip'
+          if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) { throw "Package ZIP is missing: $zip" }
+          Get-FileHash -LiteralPath $zip -Algorithm SHA256 | Format-List | Out-File 'out/VIctory-Windows-x64.SHA256.txt' -Encoding utf8
+      - name: Upload Windows runtime package
+        uses: actions/upload-artifact@v4
+        with:
+          name: VIctory-Windows-x64-${{ github.sha }}
+          path: |
+            out/VIctory-Windows-x64.zip
+            out/VIctory-Windows-x64.SHA256.txt
+          if-no-files-found: error
+          retention-days: 14
