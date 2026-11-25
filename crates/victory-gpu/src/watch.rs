@@ -825,6 +825,46 @@ pub(crate) mod tests {
         free(p);
     }
 
+    /// Pages of the ranges armed keep their bytes from before the first
+    /// write after they were taken, whichever overlapping ranges armed
+    /// them; a page unarmed keeps none until it is armed again, and none
+    /// does once the tracker is disarmed.
+    #[test]
+    fn armed_ranges_keep_their_pages_bytes_from_before_the_first_write() {
+        let p = pool(4);
+        let t = track(p, 4 * PAGE, true).expect("pool memory is tracked");
+        let all = || t.take(p, p + 4 * PAGE);
+        // SAFETY: (every write below) a byte of our pool; a guarded page
+        // faults into the handler, which saves it first where it is armed.
+        let write = |page: usize, value: u8| unsafe { ((p + page * PAGE + 8) as *mut u8).write_volatile(value) };
+        let saved = |page: usize| t.saved(p / PAGE + page).map(|bytes| bytes[8]);
+        all();
+        write(0, 1);
+        assert_eq!(saved(0), None, "nothing armed yet");
+        all();
+        // Bytes 100 of page 0 to 1 of page 2: pages 0 to 2, page 3 not.
+        t.arm(p + 100, p + 2 * PAGE + 1);
+        t.arm(p + PAGE, p + 2 * PAGE);
+        t.arm(p + PAGE + 5, p + 2 * PAGE + 1);
+        t.unarm(p / PAGE + 1);
+        for page in 0..4 {
+            write(page, 2);
+        }
+        assert_eq!([saved(0), saved(1), saved(2), saved(3)], [Some(1), None, Some(0), None]);
+        assert_eq!(saved(0), None, "handed out once");
+        all();
+        // Armed again by a range holding it.
+        t.arm(p + PAGE, p + 2 * PAGE);
+        write(1, 3);
+        write(1, 4);
+        assert_eq!(saved(1), Some(2), "from before the first write");
+        t.disarm();
+        all();
+        write(2, 5);
+        assert_eq!(saved(2), None, "disarmed");
+        drop(t);
+        free(p);
+    }
     /// Plain committed memory (the C heap) is not tracked; reserved memory
     /// is, reads as taken, and changes when the runtime maps it.
     #[test]
