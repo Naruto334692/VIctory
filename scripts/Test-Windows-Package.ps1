@@ -29,11 +29,18 @@ if ($BinaryPath) {
         throw "Runtime executable is missing: $BinaryPath"
     }
     $binary = (Resolve-Path -LiteralPath $BinaryPath).Path
-    foreach ($arguments in @(@("--help"), @("run", "--help"), @("translate", "--help"), @("config", "--help"))) {
-        $output = (& $binary @arguments 2>&1 | Out-String)
+    $cases = @(
+        [pscustomobject]@{ Arguments = @("--help"); Label = "root help" }
+        [pscustomobject]@{ Arguments = @("run", "--help"); Label = "run help" }
+        [pscustomobject]@{ Arguments = @("translate", "--help"); Label = "translate help" }
+        [pscustomobject]@{ Arguments = @("config", "--help"); Label = "config help" }
+    )
+    foreach ($case in $cases) {
+        $cliArguments = $case.Arguments
+        $output = (& $binary @cliArguments 2>&1 | Out-String)
         $exitCode = $LASTEXITCODE
         if ($exitCode -ne 0 -or [string]::IsNullOrWhiteSpace($output)) {
-            throw "CLI smoke test failed: victory $($arguments -join " ") (exit $exitCode)"
+            throw "CLI smoke test failed: $($case.Label) (exit $exitCode)"
         }
     }
     Write-Host "CLI smoke tests: ok"
