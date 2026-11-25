@@ -30,7 +30,10 @@ pub(crate) struct HostHeap {
     /// released the resource may still be read, and a freed host resource
     /// read there is a GPU page fault (the console reads stale memory).
     /// With it the view's own copy of title memory, if it has one.
-    kept: Mutex<Vec<Kept>>,
+    /// Shared because command lists may outlive the title heap object:
+    /// descriptor contents must stay alive until every list using the heap
+    /// has been reset after its last submission.
+    kept: std::sync::Arc<Mutex<Vec<Kept>>>,
     /// Where the search for free dynamic slots starts, and which are taken
     /// (by lists not yet reset).
     next: Mutex<(u32, Vec<bool>)>,
@@ -193,7 +196,7 @@ impl HostHeap {
             dynamic: extra,
             sampler,
             made: Mutex::new(vec![0; count as usize]),
-            kept: Mutex::new(vec![None; (count + extra) as usize]),
+            kept: std::sync::Arc::new(Mutex::new(vec![None; (count + extra) as usize])),
             next: Mutex::new((0, vec![false; extra as usize])),
             pairs: Mutex::new((count + extra, Vec::new())),
             pairs_end: match victory_shader::emit::NULL_BUFFER_VIEW {
@@ -509,6 +512,14 @@ impl HostHeap {
     /// The view-mark table, for the root SRV of shaders marking their writes.
     pub(crate) fn marks(&self) -> Option<&ID3D12Resource> {
         self.marks.as_ref().map(|(buffer, _)| buffer)
+    }
+
+    /// Retains the host-side contents of every descriptor slot for a list
+    /// that binds this heap. The list owns this shared registry until reset,
+    /// so destroying the title's heap cannot free a resource still named by
+    /// a recorded (but not yet submitted) command list.
+    pub(crate) fn keep_with_list(&self, list: &crate::host::HostList) {
+        list.keep_owner(self.kept.clone());
     }
 
     /// Slot `index` now views `resource` (or nothing of the host's).
