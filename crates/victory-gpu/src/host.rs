@@ -1946,6 +1946,9 @@ struct Batch {
     /// UAV ranges in descriptor heaps, armed before the GPU runs and
     /// retired after marked-page copy-back; grouped by the heap that named them.
     heap_writes: std::collections::HashMap<usize, Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize)>>,
+    /// Exact heap/copy/range tuples already recorded; avoids a quadratic scan
+    /// when many lists bind the same large descriptor heap.
+    heap_write_keys: std::collections::HashSet<(usize, usize, usize, usize)>,
 }
 
 impl Batch {
@@ -1983,11 +1986,9 @@ impl Batch {
         }
         shadow.writing(address, len, marked);
         let key = std::sync::Arc::as_ptr(viewed) as usize;
-        let ranges = self.heap_writes.entry(key).or_default();
-        if !ranges.iter().any(|(copy, at, bytes)| {
-            std::sync::Arc::ptr_eq(copy, shadow) && *at == address && *bytes == len
-        }) {
-            ranges.push((shadow.clone(), address, len));
+        let range_key = (key, std::sync::Arc::as_ptr(shadow) as usize, address, len);
+        if self.heap_write_keys.insert(range_key) {
+            self.heap_writes.entry(key).or_default().push((shadow.clone(), address, len));
         }
     }
 
