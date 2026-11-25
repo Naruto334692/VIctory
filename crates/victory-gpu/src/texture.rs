@@ -310,7 +310,12 @@ impl Staging {
             // big pools is too slow to ask page by page.
             last.read.resize(size, 0);
             crate::host::copy_mapped(last.read.as_mut_ptr(), self.memory, size, false);
-            self.detile(&last.read);
+            if !self.detile(&last.read) {
+                // Taking write-watched pages is destructive; re-queue them
+                // so a failed conversion is retried without another title write.
+                t.retry(start, start + size);
+                return (size, false);
+            }
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::TexWatched, size as u64);
             return (size, true);
@@ -333,15 +338,19 @@ impl Staging {
         if last.hash == Some(hash) {
             return (size, false);
         }
+        if !self.detile(tiled) {
+            // Keep the old hash so these contents are retried next time.
+            return (size, false);
+        }
         last.hash = Some(hash);
-        self.detile(tiled);
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexChanged, size as u64);
         (size, true)
     }
 
     /// Detiles `tiled` (the texture's memory) into the staging buffer.
-    fn detile(&self, tiled: &[u8]) {
+    /// False means a subresource failed and staging must not be published.
+    fn detile(&self, tiled: &[u8]) -> bool {
         #[cfg(feature = "diagnostics")]
         if tiled.iter().all(|&b| b == 0) {
             tracing::debug!(
@@ -365,10 +374,11 @@ impl Staging {
                 self.layout
                     .detile(tiled, mip, slice, linear, pitch, pitch * rows as usize)
             {
-                tracing::warn!(?e, mip, slice, "texture not detiled");
-                return;
+                tracing::warn!(?e, mip, slice, "texture not detiled; staging upload withheld");
+                return false;
             }
         }
+        true
     }
 }
 
