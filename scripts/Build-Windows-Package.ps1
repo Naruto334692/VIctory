@@ -9,10 +9,10 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Push-Location $repoRoot
 
 function Invoke-Cargo {
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
-    & cargo @Arguments
+    param([Parameter(Mandatory = $true)][string[]]$CargoArguments)
+    & cargo @CargoArguments
     if ($LASTEXITCODE -ne 0) {
-        throw "cargo $($Arguments -join ' ') failed with exit code $LASTEXITCODE."
+        throw "cargo $($CargoArguments -join ' ') failed with exit code $LASTEXITCODE."
     }
 }
 
@@ -21,18 +21,18 @@ try {
         throw "Cargo was not found. Install Rust using rustup, then reopen PowerShell."
     }
 
-    Invoke-Cargo xtask policy
+    Invoke-Cargo -CargoArguments @("xtask", "policy")
 
     if (-not $SkipTests) {
-        Invoke-Cargo test --workspace --locked
+        Invoke-Cargo -CargoArguments @("test", "--workspace", "--locked")
     }
 
     if ($Diagnostics) {
-        Invoke-Cargo build --profile diag -p victory --features diagnostics --locked
+        Invoke-Cargo -CargoArguments @("build", "--profile", "diag", "-p", "victory", "--features", "diagnostics", "--locked")
         $profile = "diag"
         $packageName = "VIctory-Windows-x64-diagnostics"
     } else {
-        Invoke-Cargo build --release -p victory --locked
+        Invoke-Cargo -CargoArguments @("build", "--release", "-p", "victory", "--locked")
         $profile = "release"
         $packageName = "VIctory-Windows-x64"
     }
