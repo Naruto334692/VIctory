@@ -1611,9 +1611,9 @@ mod tests {
             assert!(heap.view_addresses(&list).is_some());
             let addresses = heap.addresses.get().unwrap().as_ref().unwrap().0.clone();
             heap.keep_with_list(&list);
-            assert_eq!(references(&strides), 2, "heap and list retain stride table");
-            assert_eq!(references(&marks), 2, "heap and list retain mark table");
-            assert_eq!(references(&addresses), 2, "heap and list retain address table");
+            assert_eq!(references(&strides), 3, "heap, test, and list retain stride table");
+            assert_eq!(references(&marks), 3, "heap, test, and list retain mark table");
+            assert_eq!(references(&addresses), 3, "heap, test, and list retain address table");
             list.close();
 
             drop(heap);
