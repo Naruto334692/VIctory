@@ -1023,12 +1023,10 @@ impl Host {
             for step in &deferred.copies {
                 match step {
                     Step::GpuWrite(shadow, address, len, _) => add_back(shadow, *address, *len),
-                    Step::Heap(_viewed, writes, heap_writes) => {
-                        if *writes {
-                            let journal = heap_writes.lock().unwrap_or_else(|e| e.into_inner());
-                            for (shadow, address, len) in &journal.ranges {
-                                add_back(shadow, *address, *len);
-                            }
+                    Step::Heap(_viewed, writes, heap_writes) if *writes => {
+                        let journal = heap_writes.lock().unwrap_or_else(|e| e.into_inner());
+                        for (shadow, address, len) in &journal.ranges {
+                            add_back(shadow, *address, *len);
                         }
                     }
                     _ => {}
