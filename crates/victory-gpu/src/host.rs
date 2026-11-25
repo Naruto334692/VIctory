@@ -676,6 +676,11 @@ struct Deferred {
     /// descriptor heaps): the title may release its objects before it
     /// submits the list.
     kept: Vec<windows::core::IUnknown>,
+    /// Shared owners of descriptor-heap slot contents. A title heap can be
+    /// destroyed after recording but before submitting a list; keeping its
+    /// slot registry alive keeps every resource named by those descriptors.
+    /// Released with the rest of this list's deferred state on reset.
+    kept_owners: std::collections::HashMap<usize, std::sync::Arc<dyn std::any::Any + Send + Sync>>,
     /// Buffer ranges refreshed since the last title copy (host copy,
     /// address, bytes): refreshing them again would find the same bytes.
     refreshed: std::collections::HashSet<(usize, usize, usize)>,
@@ -1828,6 +1833,15 @@ impl HostList {
         if let Ok(object) = object.cast::<windows::core::IUnknown>() {
             self.deferred().kept.push(object);
         }
+    }
+
+    /// Keeps a shared owner alive until the list is reset. Unlike a COM
+    /// descriptor heap reference, this also retains the host-side resources
+    /// currently stored in that heap's slots.
+    pub(crate) fn keep_owner<T: Send + Sync + 'static>(&self, owner: std::sync::Arc<T>) {
+        let key = std::sync::Arc::as_ptr(&owner) as usize;
+        let owner: std::sync::Arc<dyn std::any::Any + Send + Sync> = owner;
+        self.deferred().kept_owners.entry(key).or_insert(owner);
     }
 
     /// Whether this is the first time since the reset that the list asks
