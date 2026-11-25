@@ -620,6 +620,15 @@ struct ScratchChunk {
     capacity: u64,
 }
 
+/// The UAV ranges written through one heap Step. Kept on that step rather
+/// than in the submission Batch so another command list's `missed` result
+/// cannot affect this list's copy-back.
+#[derive(Default)]
+struct HeapWrites {
+    ranges: Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize)>,
+    keys: std::collections::HashSet<(usize, usize, usize)>,
+}
+
 /// One piece of submission-time work, in recorded order.
 enum Step {
     /// A copy into title memory (destination, source, bytes): the title's
@@ -643,7 +652,11 @@ enum Step {
     Texture(std::sync::Arc<crate::texture::Staging>),
     /// Brings every buffer range a view heap's views reach up to date
     /// (`crate::bindless`).
-    Heap(std::sync::Arc<crate::bindless::Viewed>, bool),
+    Heap(
+        std::sync::Arc<crate::bindless::Viewed>,
+        bool,
+        std::sync::Arc<Mutex<HeapWrites>>,
+    ),
     /// Shaders read title memory through a view heap's page table (the
     /// heap's key, `crate::memory`): the table names every copy, each
     /// brought up to date.
@@ -695,7 +708,11 @@ impl Deferred {
             }
         } else {
             let index = self.copies.len();
-            self.copies.push(Step::Heap(viewed.clone(), writes));
+            self.copies.push(Step::Heap(
+                viewed.clone(),
+                writes,
+                Arc::new(Mutex::new(HeapWrites::default())),
+            ));
             self.heap_steps.insert(key, index);
             self.refreshed.insert((key, usize::MAX, 0));
         }
@@ -847,7 +864,7 @@ impl Host {
                     .copies
                     .iter()
                     .filter_map(|s| match s {
-                        Step::Heap(v, _) => Some(v.clone()),
+                        Step::Heap(v, _, _) => Some(v.clone()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -1006,10 +1023,10 @@ impl Host {
             for step in &deferred.copies {
                 match step {
                     Step::GpuWrite(shadow, address, len, _) => add_back(shadow, *address, *len),
-                    Step::Heap(viewed, writes) => {
-                        let key = std::sync::Arc::as_ptr(viewed) as usize;
-                        if *writes && let Some(ranges) = batch.heap_writes.get(&key) {
-                            for (shadow, address, len) in ranges {
+                    Step::Heap(_viewed, writes, heap_writes) => {
+                        if *writes {
+                            let journal = heap_writes.lock().unwrap_or_else(|e| e.into_inner());
+                            for (shadow, address, len) in &journal.ranges {
                                 add_back(shadow, *address, *len);
                             }
                         }
@@ -1908,11 +1925,11 @@ impl HostList {
                     }
                     continue;
                 }
-                Step::Heap(viewed, writes) => {
+                Step::Heap(viewed, writes, heap_writes) => {
                     crate::bindless::refresh(viewed, |s, a, l, uav| {
                         batch.add(s, a, l);
                         if *writes && uav {
-                            batch.heap_write(viewed, s, a, l);
+                            batch.heap_write(heap_writes, s, a, l);
                         }
                     });
                     continue;
@@ -1952,12 +1969,7 @@ struct Batch {
     current: std::collections::HashMap<usize, (std::sync::Arc<crate::shadow::Shadow>, usize, usize)>,
     /// Staging buffers (by address) refreshed since the last title write.
     textures: std::collections::HashSet<usize>,
-    /// UAV ranges in descriptor heaps, armed before the GPU runs and
-    /// retired after marked-page copy-back; grouped by the heap that named them.
-    heap_writes: std::collections::HashMap<usize, Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize)>>,
-    /// Exact heap/copy/range tuples already recorded; avoids a quadratic scan
-    /// when many lists bind the same large descriptor heap.
-    heap_write_keys: std::collections::HashSet<(usize, usize, usize, usize)>,
+
 }
 
 impl Batch {
@@ -1984,7 +1996,7 @@ impl Batch {
     /// though no individual draw declared its heap-indexed descriptor.
     fn heap_write(
         &mut self,
-        viewed: &std::sync::Arc<crate::bindless::Viewed>,
+        journal: &std::sync::Arc<Mutex<HeapWrites>>,
         shadow: &std::sync::Arc<crate::shadow::Shadow>,
         address: usize,
         len: usize,
@@ -1994,10 +2006,10 @@ impl Batch {
             self.flush();
         }
         shadow.writing(address, len, marked);
-        let key = std::sync::Arc::as_ptr(viewed) as usize;
-        let range_key = (key, std::sync::Arc::as_ptr(shadow) as usize, address, len);
-        if self.heap_write_keys.insert(range_key) {
-            self.heap_writes.entry(key).or_default().push((shadow.clone(), address, len));
+        let mut journal = journal.lock().unwrap_or_else(|e| e.into_inner());
+        let key = (std::sync::Arc::as_ptr(shadow) as usize, address, len);
+        if journal.keys.insert(key) {
+            journal.ranges.push((shadow.clone(), address, len));
         }
     }
 
