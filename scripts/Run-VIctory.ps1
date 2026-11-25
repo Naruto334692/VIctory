@@ -16,7 +16,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$runtime = Join-Path $PSScriptRoot "victory.exe"
+$runtime = Join-Path (Split-Path -Parent $PSScriptRoot) "victory.exe"
 if (-not (Test-Path -LiteralPath $runtime -PathType Leaf)) {
     throw "victory.exe is missing. Extract the complete VIctory-Windows-x64 package first."
 }
