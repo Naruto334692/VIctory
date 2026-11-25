@@ -18,11 +18,11 @@ The current repository status is deliberately conservative:
 - HDR, real display queries, depth bounds and scaling are not implemented.
   Depth/stencil texture planes are not uploaded by the current texture upload
   path; only plane 0 is uploaded.
-- DXGI currently advertises one 3840x2160 at 60 Hz mode. The
-  `VICTORY_WINDOW_MAX` setting limits the outer window; it does not change
-  the title's render resolution. The presenter can resize its swap chain when
-  the source render texture changes size, but user-selectable render
-  resolution/presets are not yet established.
+- DXGI now advertises 1920x1080, 2560x1440 and 3840x2160 output modes at
+  60 Hz. This is display-mode enumeration only: it does not force the title's
+  internal render-target resolution or guarantee 60 rendered frames per
+  second. `VICTORY_WINDOW_MAX` still limits only the outer window. User-facing
+  graphics presets and internal render-resolution control are not yet wired.
 - The menu runs at the title's 30 fps. The first world scene is much slower;
   no sustained gameplay performance claim is made.
 - The runtime reports average FPS and average ms/frame, CPU preparation,
@@ -80,7 +80,7 @@ driver run and cannot certify a complete gameplay scene.
 | Collision: dynamic objects | Repeated vehicle/object impacts, simultaneous contacts and chain collisions | Stable contact response; no freezes, corrupted state or runaway physics | **Not verified** |
 | Shadow stability | Static caster, moving caster, camera movement, near/far transitions and overlapping casters | No flicker, detached shadows, missing depth or stale shadow maps | **Blocked** by incomplete lighting/depth-plane path; world is currently unlit |
 | Lighting | Day/night or time-of-day transitions, moving lights, emissive effects and exposure changes | No black/overbright frames, stable material response and expected light falloff | **Blocked**; not a current runtime capability claim |
-| Resolution/output | Test 1280x720, 1920x1080, 2560x1440 and 3840x2160 source textures; resize the window repeatedly | Correct swap-chain dimensions, aspect ratio and no stale back buffer | Presenter resize path exists; title mode list is fixed at 4K/60 and presets are not verified |
+| Resolution/output | Test 1280x720, 1920x1080, 2560x1440 and 3840x2160 source textures; resize the window repeatedly | Correct swap-chain dimensions, aspect ratio and no stale back buffer | Three 60 Hz modes have unit coverage; internal title render resolution and physical display switching remain unverified |
 | Refresh rate | Test 60/120/144 Hz displays and changes while running | Correct mode negotiation and pacing without drift | **Not verified**; only 4K/60 is advertised |
 | Static vs dynamic resources | Keep one texture unchanged while rewriting another every frame; churn descriptors while previous command lists remain recorded | Static copy is skipped; dynamic updates become visible; resources live through list reset | Unit coverage exists for changed/unchanged ranges and descriptor lifetimes; scene validation pending |
 | Frame acceleration/slowdown | Compare menu, loading and world; induce CPU pressure and GPU pressure separately | No timing drift; diagnostics identify CPU preparation vs GPU time | Frame clock tests exist; world is currently 1–2 s/frame, so acceptable gameplay speed is not met |
