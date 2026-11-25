@@ -965,16 +965,28 @@ impl Host {
             // than the console's: it stays out of title memory, where it broke
             // the title's own data (runs c1, c4).
             let missed = deferred.missed.iter().any(|check| check());
+            let mut add_back = |shadow: &std::sync::Arc<crate::shadow::Shadow>, address: usize, len: usize| {
+                let key = (std::sync::Arc::as_ptr(shadow) as usize, address, len);
+                match index.get(&key) {
+                    Some(&i) => back[i].3 &= !missed,
+                    None => {
+                        index.insert(key, back.len());
+                        back.push((shadow.clone(), address, len, !missed));
+                    }
+                }
+            };
             for step in &deferred.copies {
-                if let Step::GpuWrite(shadow, address, len, _) = step {
-                    let key = (std::sync::Arc::as_ptr(shadow) as usize, *address, *len);
-                    match index.get(&key) {
-                        Some(&i) => back[i].3 &= !missed,
-                        None => {
-                            index.insert(key, back.len());
-                            back.push((shadow.clone(), *address, *len, !missed));
+                match step {
+                    Step::GpuWrite(shadow, address, len, _) => add_back(shadow, *address, *len),
+                    Step::Heap(viewed) => {
+                        let key = std::sync::Arc::as_ptr(viewed) as usize;
+                        if let Some(writes) = batch.heap_writes.get(&key) {
+                            for (shadow, address, len) in writes {
+                                add_back(shadow, *address, *len);
+                            }
                         }
                     }
+                    _ => {}
                 }
             }
         }
@@ -1867,7 +1879,12 @@ impl HostList {
                     continue;
                 }
                 Step::Heap(viewed) => {
-                    crate::bindless::refresh(viewed, |s, a, l| batch.add(s, a, l));
+                    crate::bindless::refresh(viewed, |s, a, l, uav| {
+                        batch.add(s, a, l);
+                        if uav {
+                            batch.heap_write(viewed, s, a, l);
+                        }
+                    });
                     continue;
                 }
                 &Step::Memory(heap) => {
@@ -1905,6 +1922,9 @@ struct Batch {
     current: std::collections::HashMap<usize, (std::sync::Arc<crate::shadow::Shadow>, usize, usize)>,
     /// Staging buffers (by address) refreshed since the last title write.
     textures: std::collections::HashSet<usize>,
+    /// UAV ranges in descriptor heaps, armed before the GPU runs and
+    /// retired after marked-page copy-back; grouped by the heap that named them.
+    heap_writes: std::collections::HashMap<usize, Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize)>>,
 }
 
 impl Batch {
@@ -1922,6 +1942,31 @@ impl Batch {
                 self.pending.insert(key, self.refreshes.len());
                 self.refreshes.push((shadow.clone(), address, end));
             }
+        }
+    }
+
+    /// Records a UAV range reached through a descriptor heap. Marked copies
+    /// arm page snapshots; unmarked copies flush their refresh before taking
+    /// the byte snapshot. The range is retired after the submission even
+    /// though no individual draw declared its heap-indexed descriptor.
+    fn heap_write(
+        &mut self,
+        viewed: &std::sync::Arc<crate::bindless::Viewed>,
+        shadow: &std::sync::Arc<crate::shadow::Shadow>,
+        address: usize,
+        len: usize,
+    ) {
+        let marked = shadow.marked();
+        if !marked {
+            self.flush();
+        }
+        shadow.writing(address, len, marked);
+        let key = std::sync::Arc::as_ptr(viewed) as usize;
+        let ranges = self.heap_writes.entry(key).or_default();
+        if !ranges.iter().any(|(copy, at, bytes)| {
+            std::sync::Arc::ptr_eq(copy, shadow) && *at == address && *bytes == len
+        }) {
+            ranges.push((shadow.clone(), address, len));
         }
     }
 
