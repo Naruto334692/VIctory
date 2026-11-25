@@ -121,6 +121,11 @@ const SHADER_VISIBLE: u32 = 1;
 #[cfg(windows)]
 static SHADER_HEAPS: std::sync::Mutex<Vec<(u64, u64, usize)>> = std::sync::Mutex::new(Vec::new());
 
+/// Test hook: dirty ranges flushed by the final synchronization in Heap::drop.
+#[cfg(all(windows, test))]
+static DROP_SYNCED_RANGES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Makes the host descriptor for what the title wrote at `handle`, if it
 /// is in a shader-visible heap. Keeps `SHADER_HEAPS` locked for the duration
 /// so `Heap::drop` cannot free the heap concurrently.
@@ -151,6 +156,36 @@ fn mirror(handle: u64) {
     }
 }
 
+/// Synchronizes a placed shader-visible heap whose descriptors the title
+/// copied as bytes. Returns the number of dirty ranges consumed.
+#[cfg(windows)]
+fn sync_heap(heap: &Heap, start: u64) -> usize {
+    let (Some(Some(host)), Some(written), Some(step)) =
+        (heap.host.get(), &heap.written, increment(heap.desc.kind))
+    else {
+        return 0;
+    };
+    let step = u64::from(step);
+    let ranges = written.take(start as usize, usize::MAX);
+    let count = ranges.len();
+    for (from, to) in ranges {
+        // By page: one with nothing mapped (the title unmaps heap pages
+        // too) holds no records.
+        let page_size = crate::watch::PAGE;
+        for page in (from & !(page_size - 1)..to).step_by(page_size) {
+            let (page, end) = (page.max(from), (page + page_size).min(to));
+            if !crate::host::read_into(page as *const u8, &mut [0u8; 4]) {
+                continue;
+            }
+            let (first, last) = ((page as u64 - start) / step, (end as u64 - start).div_ceil(step));
+            for index in first..last.min(u64::from(heap.desc.count)) {
+                host.mirror(index as u32, start + index * step, false);
+            }
+        }
+    }
+    count
+}
+
 /// Mirrors what the title wrote into its shader-visible heaps without a
 /// call: Grand Theft Auto VI copies descriptors (our records) into its heap
 /// as bytes, so only a change of its memory shows them. Each slot of a page
@@ -165,27 +200,7 @@ pub(crate) fn sync_heaps() {
     for &(start, _, at) in heaps.iter() {
         // SAFETY: registered heaps are live (removed when dropped).
         let heap = unsafe { &*(at as *const Heap) };
-        let (Some(Some(host)), Some(written), Some(step)) =
-            (heap.host.get(), &heap.written, increment(heap.desc.kind))
-        else {
-            continue;
-        };
-        let step = u64::from(step);
-        for (from, to) in written.take(start as usize, usize::MAX) {
-            // By page: one with nothing mapped (the title unmaps heap pages
-            // too) holds no records.
-            let page_size = crate::watch::PAGE;
-            for page in (from & !(page_size - 1)..to).step_by(page_size) {
-                let (page, end) = (page.max(from), (page + page_size).min(to));
-                if !crate::host::read_into(page as *const u8, &mut [0u8; 4]) {
-                    continue;
-                }
-                let (first, last) = ((page as u64 - start) / step, (end as u64 - start).div_ceil(step));
-                for index in first..last.min(u64::from(heap.desc.count)) {
-                    host.mirror(index as u32, start + index * step, false);
-                }
-            }
-        }
+        sync_heap(heap, start);
     }
 }
 
@@ -221,6 +236,17 @@ impl Drop for Heap {
     fn drop(&mut self) {
         let at = std::ptr::from_ref::<Heap>(self) as usize;
         let mut heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&(start, _, _)) = heaps.iter().find(|&&(_, _, h)| h == at) {
+            // A recorded list can retain the host heap after this title
+            // object is released. Flush direct byte writes before removing
+            // the range from SHADER_HEAPS, otherwise its final pre-submit
+            // descriptor updates would never reach that retained host heap.
+            let dirty_ranges = sync_heap(self, start);
+            #[cfg(test)]
+            DROP_SYNCED_RANGES.fetch_add(dirty_ranges, std::sync::atomic::Ordering::Relaxed);
+            #[cfg(not(test))]
+            let _ = dirty_ranges;
+        }
         heaps.retain(|&(_, _, h)| h != at);
     }
 }
@@ -840,6 +866,54 @@ mod tests {
             assert!(host.made(5), "made at the sync");
         }
         slot::<extern "system" fn(This) -> u32>(h, 0x10)(h);
+        crate::watch::tests::free(memory);
+    }
+
+    /// Releasing a placed heap must perform the final byte-write sync even
+    /// when a recorded host list still owns the host heap and slot registry.
+    #[cfg(windows)]
+    #[test]
+    fn dropping_heap_flushes_direct_descriptor_writes_for_recorded_lists() {
+        let memory = crate::watch::tests::pool(1);
+        let desc = HeapDesc {
+            kind: SAMPLERS,
+            count: 64,
+            flags: SHADER_VISIBLE,
+            nodes: 1,
+        };
+        let placement = Placement {
+            address: memory as u64,
+            size: 64 * 16,
+        };
+        let mut h = std::ptr::null();
+        assert_eq!(create(desc, placement, &mut h), S_OK);
+        let Some(host_heap) = heap(h).host() else {
+            slot::<extern "system" fn(This) -> u32>(h, 0x10)(h);
+            crate::watch::tests::free(memory);
+            return;
+        };
+        let host = crate::host::host().expect("host heap requires a host device");
+        let list = host.new_list().expect("a host command list");
+        host_heap.keep_with_list(&list);
+
+        // Create a valid sampler record elsewhere, then copy its bytes into
+        // the placed heap without invoking a descriptor-creation callback.
+        let mut elsewhere = [0u64; 2];
+        let at = elsewhere.as_mut_ptr() as u64;
+        create_sampler(std::ptr::null(), &[21, 3, 3, 3, 0, 1, 0, 0, 0, 0, 0, 0x7f7f_ffff, 0], at);
+        let slot_address = memory as u64 + 5 * 16;
+        // SAFETY: both ranges are valid; writing the placed heap marks its page.
+        unsafe { std::ptr::copy_nonoverlapping(at as *const u8, slot_address as *mut u8, 16) };
+        assert!(!host_heap.made(5), "the copied record is not yet mirrored");
+
+        let before = DROP_SYNCED_RANGES.load(std::sync::atomic::Ordering::Relaxed);
+        slot::<extern "system" fn(This) -> u32>(h, 0x10)(h);
+        let after = DROP_SYNCED_RANGES.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(after > before, "Heap::drop must flush the dirty descriptor range");
+
+        // The command list's retained COM heap and slot owner remain valid
+        // until its normal reset point, after which their references drop.
+        list.reset();
         crate::watch::tests::free(memory);
     }
 
