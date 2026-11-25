@@ -684,6 +684,18 @@ struct Deferred {
     missed: Vec<Box<dyn Fn() -> bool + Send>>,
 }
 
+impl Deferred {
+    /// Records a heap's use once per refresh epoch and accumulates whether
+    /// any shader in this command list writes through that heap.
+    fn defer_heap(&mut self, viewed: &std::sync::Arc<crate::bindless::Viewed>, writes: bool) {
+        let key = std::sync::Arc::as_ptr(viewed) as usize;
+        *self.heap_write_access.entry(key).or_insert(false) |= writes;
+        if self.refreshed.insert((key, usize::MAX, 0)) {
+            self.copies.push(Step::Heap(viewed.clone()));
+        }
+    }
+}
+
 impl Host {
     /// Whether the host runs mesh shaders at shader model 6.6 (translated
     /// mesh shaders need both); logged once.
@@ -1676,13 +1688,7 @@ impl HostList {
         viewed: &std::sync::Arc<crate::bindless::Viewed>,
         writes: bool,
     ) {
-        let mut deferred = self.deferred();
-        let key = std::sync::Arc::as_ptr(viewed) as usize;
-        let access = deferred.heap_write_access.entry(key).or_insert(false);
-        *access |= writes;
-        if deferred.refreshed.insert((key, usize::MAX, 0)) {
-            deferred.copies.push(Step::Heap(viewed.clone()));
-        }
+        self.deferred().defer_heap(viewed, writes);
     }
 
     /// Shaders of the list read title memory through the page table of
@@ -2971,6 +2977,26 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
     use super::Batch;
     use std::sync::Arc;
 
+    /// Multiple heap-indexed draws/dispatches in one command list need one
+    /// heap refresh, but the write declaration is the OR of every draw:
+    /// a later writer must not be hidden by an earlier read-only shader.
+    #[test]
+    fn heap_write_usage_accumulates_across_draws() {
+        use super::{Deferred, Step};
+        use std::sync::Arc;
+        let viewed = Arc::new(crate::bindless::Viewed::default());
+        let key = Arc::as_ptr(&viewed) as usize;
+        let mut deferred = Deferred::default();
+        deferred.defer_heap(&viewed, false);
+        deferred.defer_heap(&viewed, false);
+        assert_eq!(deferred.copies.len(), 1, "one heap step per refresh epoch");
+        assert!(!deferred.heap_write_access[&key], "read-only draws stay read-only");
+        deferred.defer_heap(&viewed, true);
+        deferred.defer_heap(&viewed, false);
+        assert_eq!(deferred.copies.len(), 1, "later draws reuse the heap step");
+        assert!(deferred.heap_write_access[&key], "any heap writer arms UAV ranges");
+        assert!(matches!(&deferred.copies[0], Step::Heap(heap) if Arc::ptr_eq(heap, &viewed)));
+    }
     #[test]
     fn a_texture_is_checked_once_per_submission() {
         let mut batch = Batch::default();
