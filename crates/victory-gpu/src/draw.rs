@@ -911,15 +911,22 @@ impl State {
             self.heaps
         };
         if self.host_heaps != want {
-            let mut heaps: Vec<Option<ID3D12DescriptorHeap>> = self
-                .heaps
-                .iter()
-                .filter(|&&h| h != 0)
-                .filter_map(|&h| crate::descriptor::heap(h as This).host())
-                .map(|h| Some(h.heap.clone()))
-                .collect();
-            if memory_heap && let Some(h) = crate::memory::heap() {
-                heaps.insert(0, Some(h.heap.clone()));
+            let mut heaps: Vec<Option<ID3D12DescriptorHeap>> = Vec::new();
+            for &title_heap in &self.heaps {
+                if title_heap == 0 {
+                    continue;
+                }
+                if let Some(host) = crate::descriptor::heap(title_heap as This).host() {
+                    // Keep the slot-resource registry as well as the COM
+                    // descriptor heap: the title may destroy its heap after
+                    // recording this list but before submitting it.
+                    host.keep_with_list(list);
+                    heaps.push(Some(host.heap.clone()));
+                }
+            }
+            if memory_heap && let Some(host) = crate::memory::heap() {
+                host.keep_with_list(list);
+                heaps.insert(0, Some(host.heap.clone()));
             }
             heaps.iter().flatten().for_each(|h| list.keep(h));
             // SAFETY: an open list and shader-visible heaps.
