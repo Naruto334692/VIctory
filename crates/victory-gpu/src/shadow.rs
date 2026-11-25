@@ -1004,8 +1004,8 @@ pub(crate) fn near(va: u64) -> String {
     let above = all.iter().filter(|c| c.0 > va).min();
     let mut text = match below {
         Some(&(gpu, start, len)) => format!(
-            "; the nearest title memory copy below it: {start:#x}+{len:#x} at host {gpu:#x}, offset {:#x}",
-            va - gpu
+            "; the nearest title memory copy below it: {start:#x}+{len:#x} at host {gpu:#x}, {}",
+            place(va - gpu, len)
         ),
         None => "; no title memory copy below it".into(),
     };
@@ -1018,9 +1018,26 @@ pub(crate) fn near(va: u64) -> String {
     text
 }
 
+/// Where a fault offset lies relative to a copied title-memory range.
+fn place(offset: u64, len: u64) -> String {
+    match offset.checked_sub(len) {
+        None => format!("offset {offset:#x}, inside it"),
+        Some(past) => format!("offset {offset:#x}, {past:#x} past its end"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fault_is_placed_inside_or_past_the_end_of_its_copy() {
+        assert_eq!(super::place(0, 0x40_0000), "offset 0x0, inside it");
+        assert_eq!(super::place(0x3f_ffff, 0x40_0000), "offset 0x3fffff, inside it");
+        assert_eq!(super::place(0x40_0000, 0x40_0000), "offset 0x400000, 0x0 past its end");
+        assert_eq!(super::place(0x40_3000, 0x40_0000), "offset 0x403000, 0x3000 past its end");
+    }
+
 
     /// The title writes a constant under a range an earlier list of the
     /// submission declared as written by shaders: the refresh before the
