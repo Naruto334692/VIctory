@@ -74,6 +74,10 @@ unsafe impl Sync for Host {}
 static SUBMISSION_US: [std::sync::atomic::AtomicU64; 2] =
     [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
 
+/// Time blocked in `WaitForSingleObject` for submission fences (microseconds).
+/// This is CPU wait time, not GPU execution time.
+static FENCE_WAIT_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// After submissions: shader-written ranges compared and copied back into
 /// title memory (microseconds, bytes that differed), since the last
 /// frame-rate line.
@@ -967,7 +971,9 @@ impl Host {
                     .and_then(|()| self.fence.SetEventOnCompletion(*submitted, self.event));
                 match waited {
                     Ok(()) => {
+                        let waiting = Instant::now();
                         WaitForSingleObject(self.event, INFINITE);
+                        FENCE_WAIT_US.fetch_add(waiting.elapsed().as_micros() as u64, Ordering::Relaxed);
                     }
                     Err(e) => tracing::warn!(error = %e, "host submission not waited for"),
                 }
@@ -2509,6 +2515,7 @@ impl Meter {
         let [cpu, gpu] = [0, 1].map(|i| {
             SUBMISSION_US[i].swap(0, Ordering::Relaxed) as f64 / 1000.0 / frames
         });
+        let fence_wait_ms = FENCE_WAIT_US.swap(0, Ordering::Relaxed) as f64 / 1000.0 / frames;
         let [copy_ms, copy_mb, texture_ms, texture_mb] = [0, 1, 2, 3].map(|i| {
             let scale = if i % 2 == 0 { 1e3 } else { 1e6 };
             PREPARING[i].swap(0, Ordering::Relaxed) as f64 / scale / frames
@@ -2529,8 +2536,8 @@ impl Meter {
             let p99 = percentile_ms(&frame_samples, 99.0).unwrap_or(0.0);
             tracing::info!(
                 "{fps:.1} fps, {ms:.1} ms/frame, frame-time rolling p95 {p95:.2} ms / p99 {p99:.2} ms (last {} presents); ({cpu:.1} preparing: copies {copy_ms:.1} ms \
-                 {copy_mb:.1} MB, textures {texture_ms:.1} ms {texture_mb:.1} MB; {gpu:.1} on the \
-                 GPU; {back_ms:.1} copying back {back_mb:.1} MB), {draws:.0} draws/frame, \
+                 {copy_mb:.1} MB, textures {texture_ms:.1} ms {texture_mb:.1} MB; {gpu:.1} submission-to-fence completion \
+                 ({fence_wait_ms:.1} ms blocked on fence); {back_ms:.1} copying back {back_mb:.1} MB), {draws:.0} draws/frame, \
                  dropped {dropped:.0} without a host pipeline ({making} being made) and \
                  {indirect:.0} indirect; {root_views:.0} root-view slots/frame",
                 frame_samples.len(),
