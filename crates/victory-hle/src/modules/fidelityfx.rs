@@ -268,7 +268,7 @@ fn versions(host: &Host) -> Result<String, String> {
         ));
     }
     names.truncate(count as usize);
-    let names = names
+    Ok(names
         .iter()
         .filter(|n| !n.is_null())
         // SAFETY: NUL-terminated names the DLL keeps.
