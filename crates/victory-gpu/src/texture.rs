@@ -15,8 +15,10 @@
 //! shaders that index the heap themselves every texture with a resource
 //! object the heap views (`crate::bindless`); textures the title placed in
 //! memory itself are not made for the heap (see `descriptor::host`). Plane
-//! 0 is uploaded (every mip and array slice), depth and stencil planes are
-//! not.
+//! 0 is uploaded (every mip and array slice); additional depth/stencil
+//! planes and XOR-swizzled layouts are not yet uploaded. Rejected and
+//! incomplete texture descriptors are logged with a bounded per-descriptor
+//! diagnostic so the unsupported classes can be identified in a capture.
 
 use std::sync::{Arc, Mutex};
 
@@ -427,6 +429,62 @@ pub(crate) fn committed(at: *const u8, len: usize) -> bool {
     true
 }
 
+/// Logs distinct texture upload problems, capped to avoid flooding the
+/// runtime log while a title repeatedly samples the same unsupported texture.
+fn note_texture_issue(
+    reason: &'static str,
+    desc: &crate::resource::ResourceDesc,
+    host_desc: &D3D12_RESOURCE_DESC,
+    layout: Option<&victory_formats::texture::Texture>,
+) {
+    static LOGGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let key = format!(
+        "{reason}|{desc:?}|host:{}:{}x{}x{}:{}:{}:{}",
+        host_desc.Format.0,
+        host_desc.Width,
+        host_desc.Height,
+        host_desc.DepthOrArraySize,
+        host_desc.MipLevels,
+        host_desc.SampleDesc.Count,
+        host_desc.Dimension.0
+    );
+    {
+        let mut logged = LOGGED.lock().unwrap_or_else(|e| e.into_inner());
+        if logged.len() >= 64 || logged.contains(&key) {
+            return;
+        }
+        logged.push(key);
+    }
+    let planes: Vec<_> = layout
+        .map(|texture| {
+            texture
+                .planes
+                .iter()
+                .map(|plane| {
+                    (
+                        plane.offset,
+                        plane.stencil,
+                        plane.layout.desc.format,
+                        plane.layout.desc.swizzle.0,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    tracing::warn!(
+        reason,
+        ?desc,
+        host_format = host_desc.Format.0,
+        host_width = host_desc.Width,
+        host_height = host_desc.Height,
+        host_depth_or_array = host_desc.DepthOrArraySize,
+        host_mips = host_desc.MipLevels,
+        host_samples = host_desc.SampleDesc.Count,
+        console_planes = ?planes,
+        "sampled texture upload is incomplete or skipped"
+    );
+}
+
 /// The staging state of a title texture's host texture, made on first use
 /// (one for all title textures of its memory).
 fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
@@ -436,25 +494,47 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
         return Some(s.clone());
     }
     let (memory, desc) = crate::resource::texture_memory(resource)?;
-    let Some(layout) = crate::resource::texture_layout(&desc).map(|t| t.planes[0].layout.clone())
-    else {
+    // SAFETY: a live resource.
+    let d = unsafe { texture.GetDesc() };
+    let Some(console_layout) = crate::resource::texture_layout(&desc) else {
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexNoLayout, 1);
-        once!(
-            ?desc,
-            "texture contents without a console layout not uploaded"
+        note_texture_issue("no console texture layout", &desc, &d, None);
+        return None;
+    };
+    let Some(first_plane) = console_layout.planes.first() else {
+        #[cfg(feature = "diagnostics")]
+        crate::copystat::add(crate::copystat::C::TexNoLayout, 1);
+        note_texture_issue(
+            "console texture layout has no data planes",
+            &desc,
+            &d,
+            Some(&console_layout),
         );
         return None;
     };
+    let missing_planes = console_layout.planes.len().saturating_sub(1);
+    if missing_planes != 0 {
+        #[cfg(feature = "diagnostics")]
+        crate::copystat::add(
+            crate::copystat::C::TexMissingPlanes,
+            missing_planes as u64,
+        );
+        note_texture_issue(
+            "additional console data planes are not uploaded",
+            &desc,
+            &d,
+            Some(&console_layout),
+        );
+    }
+    let layout = first_plane.layout.clone();
     if layout.desc.swizzle.xor() {
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexXorSwizzle, 1);
-        once!(?desc, "texture contents in an XOR mode not uploaded");
+        note_texture_issue("unsupported XOR swizzle", &desc, &d, Some(&console_layout));
         return None;
     }
     let host = host()?;
-    // SAFETY: a live resource.
-    let d = unsafe { texture.GetDesc() };
     let count = if d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D {
         u32::from(d.MipLevels)
     } else {

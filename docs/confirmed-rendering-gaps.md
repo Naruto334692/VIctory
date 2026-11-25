@@ -17,20 +17,23 @@ Potential visible consequences to investigate (not yet proven): missing/incorrec
 
 ### Current diagnostics
 
-With the `victory-gpu/diagnostics` feature enabled, the per-frame copy-statistics line now includes:
+With the `victory-gpu/diagnostics` feature enabled, the per-frame copy-statistics line includes:
 - `detile failures`: subresources whose detile operation failed and whose staging upload was withheld;
 - `texture skips: no layout`: texture staging rejected because no console texture layout was available;
 - `XOR swizzle`: texture staging rejected because the layout uses an unsupported XOR mode;
-- `uncommitted memory`: a sampled texture's title-memory range was not committed/readable.
+- `uncommitted memory`: a sampled texture's title-memory range was not committed/readable;
+- `missing data planes`: additional console texture data planes (for example stencil) represented by the format layout but not uploaded by the current plane-0 path.
 
-These counters distinguish known rejection paths, but they do not yet identify unsupported formats or missing depth/stencil planes individually. The counters are diagnostic evidence only; a nonzero count does not by itself prove that the affected texture appears in the visibly broken scene. Capture the same scene and correlate counters with texture descriptors and frame captures.
+The texture path also logs at most 64 distinct descriptor signatures for rejected or incomplete uploads. Each warning includes the raw console resource description, host format and dimensions, mip/array/sample metadata, and the known console-plane offsets, stencil flags, formats and swizzle values. This limit is global for the process lifetime, not a per-frame log quota. The counter and warning identify an unsupported path; they do not prove that the affected texture caused a visible defect.
+
+A unit test in `victory-formats` now verifies that console formats 118-120 expose distinct depth and stencil layout planes with valid offsets. This tests the layout metadata only; GPU plane-aware upload and physical rendering remain unimplemented. Capture the same scene and correlate descriptor warnings with frame captures.
 
 ### Required follow-up
 
-1. Capture actual world texture descriptors and identify which formats, swizzles and plane counts are used by visible broken surfaces.
-2. Add descriptor-level diagnostics for format, dimensions, mip count, array/depth size, plane count and swizzle mode, while avoiding unbounded per-frame log spam.
+1. Capture the same broken world scene and collect the bounded descriptor warnings and per-frame texture counters.
+2. Correlate the reported console planes, formats and swizzles with host D3D12 descriptors and frame captures.
 3. Implement plane-aware layout and upload only after matching console plane layout to host D3D12 subresource indices and footprints.
-4. Add unit tests for one-plane color, depth-only, depth/stencil, mip chains, arrays, 3D textures and unsupported combinations.
+4. Add GPU-path tests for one-plane color, depth-only, depth/stencil, mip chains, arrays, 3D textures and unsupported combinations.
 5. Implement XOR address calculation only with the required pipe/bank configuration; do not guess an XOR mapping.
 6. Verify on a physical GPU with captures of the same scene before and after the change.
 
