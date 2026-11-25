@@ -676,6 +676,9 @@ struct Deferred {
     /// descriptor heaps): the title may release its objects before it
     /// submits the list.
     kept: Vec<windows::core::IUnknown>,
+    /// COM identities already held by this list; repeated draws must not
+    /// grow the retained-reference vector without bound.
+    kept_ids: std::collections::HashSet<usize>,
     /// Shared owners of descriptor-heap slot contents. A title heap can be
     /// destroyed after recording but before submitting a list; keeping its
     /// slot registry alive keeps every resource named by those descriptors.
@@ -1831,7 +1834,11 @@ impl HostList {
     /// Keeps `object` alive until the list is reset.
     pub(crate) fn keep(&self, object: &impl Interface) {
         if let Ok(object) = object.cast::<windows::core::IUnknown>() {
-            self.deferred().kept.push(object);
+            let key = windows::core::Interface::as_raw(&object) as usize;
+            let mut deferred = self.deferred();
+            if deferred.kept_ids.insert(key) {
+                deferred.kept.push(object);
+            }
         }
     }
 
