@@ -245,13 +245,11 @@ impl Uploads {
 /// (in the submission's batch of refreshes): the pages the title changed
 /// since their copies took them.
 ///
-/// shortcut: what shaders write through the heap's unordered access views
-/// stays in the host copies (later draws read it there) and does not go
-/// back to title memory, so the CPU does not see it, and a page the title
-/// also writes is copied over from title memory, losing the GPU's bytes
-/// there. Copying back the whole unordered ranges after every submission
-/// (about 1 GB of them in the world) cost seconds per frame; the upgrade
-/// is shaders marking the pages they write (as `crate::memory` does).
+/// Heap UAV ranges are passed to the submission as writes as well as
+/// refreshes: the host arms their marked pages before the GPU runs, so a
+/// title write to the same 64 KiB page keeps its pre-write bytes for
+/// `Shadow::copy_back_marked`. The callback receives whether each merged
+/// range is an unordered-access range.
 pub(crate) fn refresh(viewed: &Viewed, mut add: impl FnMut(&Arc<Shadow>, usize, usize, bool)) {
     for (shadow, address, len, uav) in viewed.ranges() {
         add(&shadow, address as usize, len as usize, uav);
@@ -612,5 +610,34 @@ void main(uint3 id : SV_DispatchThreadID) {
                 assert_eq!(v, base + i as u32 + u32::from(texel), "round {round}, dword {i}");
             }
         }
+    }
+    /// The heap registry must preserve whether a merged host-copy range
+    /// is SRV or UAV: only UAV ranges are declared as GPU writes and armed
+    /// before marked-page copy-back.
+    #[test]
+    fn refresh_reports_buffer_view_access_kind() {
+        const PAGE: usize = crate::watch::PAGE;
+        let p = crate::watch::tests::pool(2);
+        crate::shadow::register(p, p as u64, (2 * PAGE) as u64);
+        let Some(copy) = crate::shadow::find(p as u64, (2 * PAGE) as u64) else {
+            crate::shadow::unregister(p, p as u64);
+            crate::watch::tests::free(p);
+            return; // no host GPU here
+        };
+        let viewed = Viewed::default();
+        {
+            let mut inner = viewed.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.count(&Seen::Buffer(copy.clone(), p as u64, PAGE as u64, false), true);
+            inner.count(&Seen::Buffer(copy.clone(), (p + PAGE) as u64, PAGE as u64, true), true);
+        }
+        let mut kinds = Vec::new();
+        refresh(&viewed, |_shadow, _address, _len, uav| kinds.push(uav));
+        assert_eq!(kinds.len(), 2);
+        assert!(kinds.contains(&false), "the SRV range remains a read");
+        assert!(kinds.contains(&true), "the UAV range remains a write");
+        drop(viewed);
+        crate::shadow::unregister(p, p as u64);
+        drop(copy);
+        crate::watch::tests::free(p);
     }
 }
