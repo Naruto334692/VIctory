@@ -805,6 +805,20 @@ pub(crate) mod tests {
         free(p);
     }
 
+    #[test]
+    fn failed_consumer_can_requeue_taken_pages() {
+        let p = pool(2);
+        let t = track(p, 2 * PAGE, true).expect("pool memory is tracked");
+        assert_eq!(t.take(p, p + 2 * PAGE), [(p, p + 2 * PAGE)]);
+        assert!(t.unchanged());
+        t.retry(p, p + 2 * PAGE);
+        assert!(!t.unchanged());
+        assert_eq!(t.take(p, p + 2 * PAGE), [(p, p + 2 * PAGE)]);
+        assert!(t.unchanged());
+        drop(t);
+        free(p);
+    }
+
     /// A tracker knows without its lock whether any page changed since it
     /// was taken: not at first, after everything is taken, and not again
     /// once the title writes (a fault), we or the kernel write (reported),
