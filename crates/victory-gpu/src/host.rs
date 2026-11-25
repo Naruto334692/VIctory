@@ -1008,11 +1008,9 @@ impl Host {
                     Step::GpuWrite(shadow, address, len, _) => add_back(shadow, *address, *len),
                     Step::Heap(viewed, writes) => {
                         let key = std::sync::Arc::as_ptr(viewed) as usize;
-                        if *writes {
-                            if let Some(ranges) = batch.heap_writes.get(&key) {
-                                for (shadow, address, len) in ranges {
-                                    add_back(shadow, *address, *len);
-                                }
+                        if *writes && let Some(ranges) = batch.heap_writes.get(&key) {
+                            for (shadow, address, len) in ranges {
+                                add_back(shadow, *address, *len);
                             }
                         }
                     }
