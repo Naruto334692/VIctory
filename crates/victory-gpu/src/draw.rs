@@ -749,7 +749,7 @@ impl State {
                 let gpu = (self.heaps[0] != 0)
                     .then(|| crate::descriptor::heap(self.heaps[0] as This).host())
                     .flatten()
-                    .and_then(|h| h.view_addresses());
+                    .and_then(|h| h.view_addresses(list));
                 let Some(gpu) = gpu else {
                     once!("a shader reading a view's address dropped: no view heap");
                     not_run("view addresses without a view heap");
@@ -928,7 +928,8 @@ impl State {
                 host.keep_with_list(list);
                 heaps.insert(0, Some(host.heap.clone()));
             }
-            heaps.iter().flatten().for_each(|h| list.keep(h));
+            // HostHeap::keep_with_list retains the descriptor heaps,
+            // their slot resources, and their stride/mark metadata buffers.
             // SAFETY: an open list and shader-visible heaps.
             unsafe { list.list.SetDescriptorHeaps(&heaps) };
             self.host_heaps = want;
