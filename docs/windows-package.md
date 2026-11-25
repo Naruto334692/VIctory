@@ -17,8 +17,8 @@ From a PowerShell terminal in the repository:
 rustup toolchain install
 cargo xtask policy
 cargo test --workspace --locked
-cargo build --release -p victory --locked
 .\scripts\Build-Windows-Package.ps1 -SkipTests
+.\scripts\Test-Windows-Package.ps1 -BinaryPath .\target\release\victory.exe -PackageZip .\out\VIctory-Windows-x64.zip
 ```
 
 The ZIP is written to out\VIctory-Windows-x64.zip. The package contains victory.exe, the GPL-3.0 license, project documentation, the example configuration and the PowerShell launcher.
@@ -29,11 +29,11 @@ For a diagnostic build, use:
 .\scripts\Build-Windows-Package.ps1 -Diagnostics
 ```
 
-The diagnostic executable is built with the diagnostics feature and is intended for troubleshooting, not faster gameplay.
+The diagnostic executable is built with the diagnostics feature and is intended for troubleshooting, not faster gameplay. Its RUN-THIS-FIRST.txt contains commands to enable DRED/GPU timing and launch it with the same user-file launcher.
 
 ## Automated build
 
-The .github/workflows/windows-package.yml workflow builds on a GitHub-hosted Windows runner when a commit is pushed to the windows/pc-runtime-package branch, and can also be started manually from the repository's Actions tab when workflow dispatch is enabled. It runs workspace tests, builds the release executable, creates the ZIP and uploads it as a workflow artifact. The artifact is temporary CI output, not a permanent release.
+The .github/workflows/windows-package.yml workflow builds on a GitHub-hosted Windows runner when a commit is pushed to the windows/pc-runtime-package branch, and can also be started manually from the repository's Actions tab when workflow dispatch is enabled. It parses the PowerShell scripts, runs workspace tests, builds the release executable, smoke-tests CLI help commands, checks the ZIP for required files and forbidden game payloads, writes a SHA-256 checksum, and uploads the ZIP as a workflow artifact. The artifact is temporary CI output, not a permanent release.
 
 ## Run with the user's files
 
