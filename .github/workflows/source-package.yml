@@ -1,0 +1,41 @@
+name: Source package
+
+on:
+  push:
+    branches:
+      - "integration/root-view-trace-with-bindless-uav"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Build source archive
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Create source ZIP and checksum
+        env:
+          BUILD_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          archive="dist/VIctory-source-${BUILD_SHA:0:12}.zip"
+          git archive --format=zip --prefix=VIctory/ "$BUILD_SHA" > "$archive"
+          sha256sum "$archive" > "$archive.sha256"
+          printf 'commit=%s\n' "$BUILD_SHA" > dist/BUILD-COMMIT.txt
+          unzip -t "$archive" >/dev/null
+
+      - name: Upload verified source package
+        uses: actions/upload-artifact@v4
+        with:
+          name: VIctory-source-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
