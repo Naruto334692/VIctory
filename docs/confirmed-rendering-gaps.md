@@ -24,7 +24,7 @@ With the `victory-gpu/diagnostics` feature enabled, the per-frame copy-statistic
 - `uncommitted memory`: a sampled texture's title-memory range was not committed/readable;
 - `missing data planes`: additional console texture data planes (for example stencil) represented by the format layout but not uploaded by the current plane-0 path.
 
-The texture path also logs at most 64 distinct descriptor signatures for rejected or incomplete uploads. Each warning includes the raw console resource description, host format and dimensions, mip/array/sample metadata, and the known console-plane offsets, stencil flags, formats and swizzle values. This limit is global for the process lifetime, not a per-frame log quota. The counter and warning identify an unsupported path; they do not prove that the affected texture caused a visible defect.
+The texture path also logs at most 64 distinct descriptor signatures for rejected or incomplete uploads. Each warning includes the raw console resource description, host format and dimensions, mip/array/sample metadata, and the known console-plane offsets, stencil flags, element byte sizes and swizzle values. This limit is global for the process lifetime, not a per-frame log quota. The counter and warning identify an unsupported path; they do not prove that the affected texture caused a visible defect.
 
 A unit test in `victory-formats` now verifies that console formats 118-120 expose distinct depth and stencil layout planes with valid offsets. This tests the layout metadata only; GPU plane-aware upload and physical rendering remain unimplemented. Capture the same scene and correlate descriptor warnings with frame captures.
 

@@ -464,7 +464,7 @@ fn note_texture_issue(
                     (
                         plane.offset,
                         plane.stencil,
-                        plane.layout.desc.format,
+                        plane.layout.desc.element_bytes,
                         plane.layout.desc.swizzle.0,
                     )
                 })
