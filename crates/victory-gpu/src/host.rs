@@ -2600,12 +2600,17 @@ impl Meter {
 
 /// Nearest-rank percentile of a small, bounded frame-time sample.
 fn percentile_ms(samples: &[f64], percentile: f64) -> Option<f64> {
-    if samples.is_empty() {
+    let mut sorted: Vec<_> = samples.iter().copied().filter(|value| value.is_finite()).collect();
+    if sorted.is_empty() {
         return None;
     }
-    let mut sorted = samples.to_vec();
     sorted.sort_by(f64::total_cmp);
-    let fraction = (percentile.clamp(0.0, 100.0) / 100.0).max(1.0 / sorted.len() as f64);
+    let percentile = if percentile.is_finite() {
+        percentile.clamp(0.0, 100.0)
+    } else {
+        100.0
+    };
+    let fraction = (percentile / 100.0).max(1.0 / sorted.len() as f64);
     let index = (fraction * sorted.len() as f64).ceil() as usize - 1;
     sorted.get(index).copied()
 }
@@ -2624,6 +2629,8 @@ mod frame_time_tests {
         assert_eq!(percentile_ms(&samples, 95.0), Some(100.0));
         assert_eq!(percentile_ms(&samples, 99.0), Some(100.0));
         assert_eq!(percentile_ms(&samples, 100.0), Some(100.0));
+        assert_eq!(percentile_ms(&[1.0, f64::NAN, f64::INFINITY], 95.0), Some(1.0));
+        assert_eq!(percentile_ms(&samples, f64::NAN), Some(100.0));
     }
 }
 
