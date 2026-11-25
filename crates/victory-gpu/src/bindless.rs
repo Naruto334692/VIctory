@@ -506,12 +506,12 @@ void main(uint3 id : SV_DispatchThreadID) {
     /// The title writes a buffer and a texture, and views of them and of an
     /// output buffer into its heap; a shader reaching them only through the
     /// heap (no table entry names them) reads what the title wrote at
-    /// submission, every round. The output buffer's UAV is marked; a deferred
-    /// title write to a different DWORD of the same page after the heap step
-    /// must survive the shader's marked-page copy-back.
+    /// submission, every round. The test's native shader has no VIctory
+    /// write-mark table, so its heap UAV must use the snapshot fallback and
+    /// preserve a deferred title write outside the shader's write span.
     #[test]
     fn heap_views_are_current() {
-        let (src, dst) = (resource(1, 256, 1, 0, 1), resource(1, 256, 1, 0, 1));
+        let (src, dst) = (resource(1, 256, 1, 0, 1), resource(1, 512, 1, 0, 1));
         let tex = resource(3, 4, 1, 28, LINEAR);
         let write = |base: u32, texel: u8| {
             let (src_bytes, _) = crate::resource::buffer_bytes(src).unwrap();
@@ -537,7 +537,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         let (a, b) = crate::watch::tests::twin_views(3);
         let src = resource_at(a, 1, 256, 1, 0, 1);
         let tex = resource_at(a + PAGE_BYTES, 3, 4, 1, 28, LINEAR);
-        let dst = resource_at(a + 2 * PAGE_BYTES, 1, 256, 1, 0, 1);
+        let dst = resource_at(a + 2 * PAGE_BYTES, 1, 512, 1, 0, 1);
         let (_, tex_desc) = crate::resource::texture_memory(tex).unwrap();
         let size = crate::resource::texture_layout(&tex_desc).unwrap().planes[0].layout.size as usize;
         let write = |base: u32, texel: u8| {
@@ -575,10 +575,10 @@ void main(uint3 id : SV_DispatchThreadID) {
         assert_eq!(crate::descriptor::create_heap(null, heap_desc.as_ptr().cast(), &iid, &mut heap), S_OK);
         let title_heap = crate::descriptor::heap(heap);
         let slot = |i: u64| title_heap.start + 32 * i;
-        // Raw views of 64 dwords: format R32_TYPELESS, buffer dimension,
-        // the default mapping, then first element, count, stride, flags.
+        // The shader reads 64 dwords and writes the first 64 of a 128-dword
+        // UAV view, leaving dword 100 untouched for the CPU-write check.
         let srv: [u32; 10] = [39, 1, 0x1688, 0, 0, 0, 64, 0, 1, 0];
-        let uav: [u32; 10] = [39, 1, 0, 0, 64, 0, 0, 0, 1, 0];
+        let uav: [u32; 10] = [39, 1, 0, 0, 128, 0, 0, 0, 1, 0];
         crate::descriptor::create_srv(null, src, &srv, slot(0));
         crate::descriptor::create_uav(null, dst, null, &uav, slot(1));
         crate::descriptor::create_srv(null, tex, std::ptr::null(), slot(2));
@@ -586,7 +586,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         let (root, pso) = compile();
         let list = host.new_list().unwrap();
         let (dst_bytes, _) = crate::resource::buffer_bytes(dst).unwrap();
-        let out = crate::shadow::find(dst_bytes as u64, 256).expect("the output's host copy");
+        let out = crate::shadow::find(dst_bytes as u64, 512).expect("the output's host copy");
         for (round, (base, texel)) in [(1000u32, 0x40u8), (5000, 0x10), (9000, 0x22)].into_iter().enumerate() {
             if round > 0 {
                 list.reset();
@@ -599,10 +599,12 @@ void main(uint3 id : SV_DispatchThreadID) {
                 list.list.SetPipelineState(&pso);
                 list.list.Dispatch(4, 1, 1);
             }
-            list.defer_heap(&heap_host.viewed, true);
+            // This native D3DCompile shader does not carry VIctory's injected
+            // write-mark table; require the byte-snapshot fallback.
+            list.defer_heap(&heap_host.viewed, true, false);
             // Run after the heap's refresh/arming, but before the GPU list:
             // emulate a title thread changing one DWORD on the same page.
-            let cpu_write_at = dst_bytes as usize + 20 * std::mem::size_of::<u32>();
+            let cpu_write_at = dst_bytes as usize + 100 * std::mem::size_of::<u32>();
             let cpu_write_value = 0xC0DE_0000 | round as u32;
             list.defer(move || {
                 let _writing = crate::watch::writing(cpu_write_at, std::mem::size_of::<u32>());
@@ -613,17 +615,17 @@ void main(uint3 id : SV_DispatchThreadID) {
             // The title writes its SRV and texture after recording, before submitting.
             write(base, texel);
             host.execute(&[&list]);
-            let words = out.read_host(dst_bytes as u64, 64);
+            let words = out.read_host(dst_bytes as u64, 128);
             // SAFETY: the GPU fence has completed; this test owns the
-            // destination's 256-byte title-memory allocation.
-            let title_words = unsafe { std::slice::from_raw_parts(dst_bytes.cast_const().cast::<u32>(), 64) };
-            for (i, &v) in words.iter().enumerate().take(16) {
+            // destination's 512-byte title-memory allocation.
+            let title_words = unsafe { std::slice::from_raw_parts(dst_bytes.cast_const().cast::<u32>(), 128) };
+            for (i, &v) in words.iter().enumerate().take(64) {
                 let expected = base + i as u32 + u32::from(texel);
                 assert_eq!(v, expected, "round {round}, host GPU dword {i}");
                 assert_eq!(title_words[i], expected, "round {round}, title GPU dword {i}");
             }
-            assert_eq!(words[20], cpu_write_value, "round {round}, host CPU-only dword survives");
-            assert_eq!(title_words[20], cpu_write_value, "round {round}, title CPU-only dword survives on the same page");
+            assert_eq!(words[100], cpu_write_value, "round {round}, host CPU-only dword survives");
+            assert_eq!(title_words[100], cpu_write_value, "round {round}, title CPU-only dword survives on the same page");
         }
     }
     /// The heap registry must preserve whether a merged host-copy range
