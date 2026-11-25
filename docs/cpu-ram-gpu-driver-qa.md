@@ -205,3 +205,14 @@ second driver version.
   https://learn.microsoft.com/en-us/windows/pix/directx-dump-files/overview
 
 Driver cleanup is a user-side troubleshooting operation, not a runtime workaround. Use the vendor utility only when evidence points to a corrupted/conflicting installation, and save a restore point or recovery path first.
+
+
+## Frame-time tail latency (implemented in the runtime)
+
+The frame meter now keeps a bounded rolling sample of the last 600 successful
+present intervals and reports nearest-rank p95/p99 in the periodic performance
+log. These are **present-to-present intervals**, so they include time spent
+between successful presents (CPU work, waits and pacing); they are not a pure
+GPU execution-time measurement. GPU submission/wait timing remains a separate
+counter. Compare p95/p99 with average frame time to identify stutter hidden by
+a good average. The sample is bounded and does not grow with session duration.
