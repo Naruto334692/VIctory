@@ -68,6 +68,64 @@ unsafe impl Send for Host {}
 // SAFETY: as above.
 unsafe impl Sync for Host {}
 
+/// A bounded retirement queue for objects that must outlive GPU execution.
+///
+/// This primitive is deliberately not wired into submission yet: the current
+/// runtime still performs synchronous waits and its title-memory copy-back
+/// must be moved behind the same fence before asynchronous submission is safe.
+const MAX_IN_FLIGHT_SUBMISSIONS: usize = 2;
+
+struct FenceRetirement<T> {
+    pending: VecDeque<(u64, T)>,
+    capacity: usize,
+    last_submitted: u64,
+}
+
+impl<T> FenceRetirement<T> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            pending: VecDeque::with_capacity(capacity),
+            capacity,
+            last_submitted: 0,
+        }
+    }
+
+    fn can_submit(&self) -> bool {
+        self.pending.len() < self.capacity
+    }
+
+    /// Retains an owner until the fence reaches the supplied value.
+    /// Fence values must be strictly increasing and the queue must be bounded.
+    fn push(&mut self, value: u64, owner: T) -> Result<(), T> {
+        if !self.can_submit() || value <= self.last_submitted {
+            return Err(owner);
+        }
+        self.last_submitted = value;
+        self.pending.push_back((value, owner));
+        Ok(())
+    }
+
+    /// Drops only entries whose fence value is known to have completed.
+    fn retire_completed(&mut self, completed: u64) -> Vec<T> {
+        let mut retired = Vec::new();
+        while self.pending.front().is_some_and(|(value, _)| *value <= completed) {
+            if let Some((_, owner)) = self.pending.pop_front() {
+                retired.push(owner);
+            }
+        }
+        retired
+    }
+
+    fn oldest_fence(&self) -> Option<u64> {
+        self.pending.front().map(|(value, _)| *value)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.pending.len()
+    }
+}
+
 /// Time spent in submissions since the last frame-rate line, in
 /// microseconds: preparing them on the CPU (title memory copies, texture
 /// detiling), then waiting for the GPU.
@@ -287,6 +345,47 @@ fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fence_retirement_is_bounded_and_waits_for_completion() {
+        use super::{FenceRetirement, MAX_IN_FLIGHT_SUBMISSIONS};
+
+        let mut queue = FenceRetirement::new(MAX_IN_FLIGHT_SUBMISSIONS);
+        assert!(queue.can_submit());
+        queue.push(10, "first").unwrap();
+        queue.push(11, "second").unwrap();
+        assert_eq!(queue.len(), 2);
+        assert!(!queue.can_submit());
+        assert_eq!(queue.oldest_fence(), Some(10));
+
+        // Completion of 10 retires only the first owner.
+        assert_eq!(queue.retire_completed(10), vec!["first"]);
+        assert_eq!(queue.len(), 1);
+        assert!(queue.can_submit());
+
+        // An incomplete fence must never release the remaining owner.
+        assert!(queue.retire_completed(10).is_empty());
+        assert_eq!(queue.oldest_fence(), Some(11));
+        assert_eq!(queue.retire_completed(11), vec!["second"]);
+        assert_eq!(queue.len(), 0);
+    }
+
+    #[test]
+    fn fence_retirement_rejects_non_monotonic_or_over_capacity_entries() {
+        use super::FenceRetirement;
+
+        let mut queue = FenceRetirement::new(1);
+        queue.push(5, "held").unwrap();
+        assert_eq!(queue.push(6, "over capacity"), Err("over capacity"));
+        assert_eq!(queue.push(5, "duplicate"), Err("duplicate"));
+        assert_eq!(queue.push(4, "older"), Err("older"));
+        assert_eq!(queue.retire_completed(5), vec!["held"]);
+
+        // Retiring does not permit fence-value reuse.
+        assert_eq!(queue.push(5, "reused"), Err("reused"));
+        queue.push(6, "next").unwrap();
+        assert_eq!(queue.retire_completed(6), vec!["next"]);
+    }
+
     #[test]
     fn swap_chain_failures_retry_once_per_second_and_success_clears_the_wait() {
         use super::{Duration, Instant, SwapChainRetry};
