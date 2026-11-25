@@ -96,8 +96,14 @@ pub(crate) enum C {
     MarkedUs,
     MarkedKept,
     SavedPages,
+    /// Texture upload rejected because no console texture layout was available.
+    TexNoLayout,
+    /// Texture upload rejected because the console layout uses XOR swizzling.
+    TexXorSwizzle,
+    /// Texture memory was not committed/readable when sampled.
+    TexUncommitted,
 }
-const COUNTERS: usize = 58;
+const COUNTERS: usize = 61;
 static COUNT: [AtomicU64; COUNTERS] = [const { AtomicU64::new(0) }; COUNTERS];
 
 pub(crate) fn add(c: C, n: u64) {
@@ -227,7 +233,7 @@ pub(crate) fn log(frames: f64) {
          refresh batches, steps (each with the batch it flushes): refresh {:.1} ms, copy {:.1} ms, \
          work {:.1} ms, GPU writes {:.1} ms, textures {:.1} ms, heaps {:.1} ms, title memory {:.1} ms; \
          heap texture uploads {:.1} ms, state preludes {:.1} ms; copying back compared {:.1} MB          in {:.1} ms; marked pages: {:.0} compared, {:.1} MB written back in {:.1} ms, {:.0} kept the title's, {:.0} saved; working set {:.0} MB, \
-         {:.0} hard faults",
+         {:.0} hard faults; texture skips: no layout {:.0}, XOR swizzle {:.0}, uncommitted memory {:.0}",
         c[C::Submissions as usize],
         c[C::Copies as usize],
         mb(c[C::CopyBytes as usize]),
@@ -293,6 +299,9 @@ pub(crate) fn log(frames: f64) {
             let hard = hard_faults();
             (hard - HARD.swap(hard, Relaxed).min(hard)) as f64 / frames
         },
+        c[C::TexNoLayout as usize],
+        c[C::TexXorSwizzle as usize],
+        c[C::TexUncommitted as usize],
     );
     let held: Vec<String> = crate::watch::held_times()
         .iter()
