@@ -81,7 +81,20 @@ archives, shaders, save files, account credentials, or any proprietary title dat
     Set-Content -LiteralPath (Join-Path $stageDir "BUILD-INFO.txt") -Value $buildInfo -Encoding UTF8
 
     if ($Diagnostics) {
-        $firstRun = "Start the diagnostic executable manually from target\diag\victory.exe in the source checkout. This portable package is for developer diagnostics and does not include game data."
+        $firstRun = @"
+DIAGNOSTIC PACKAGE
+
+This package contains the diagnostics-enabled VIctory runtime. It still needs
+your own legally obtained title files; no game data is included.
+
+Open PowerShell in this extracted folder, then run:
+    $env:VICTORY_D3D12_DRED = '1'
+    $env:VICTORY_GPU_TIMING = '1'
+    .\scripts\Run-VIctory.ps1 -GameDir 'D:\YourGameFiles' -GameExe 'YourTitle.exe'
+
+Diagnostics and timing can reduce performance. Keep the console output and
+crashes.log when reporting a reproducible problem.
+"@
     } else {
         $firstRun = @"
 1. Read RUN-THIS-FIRST.txt.
