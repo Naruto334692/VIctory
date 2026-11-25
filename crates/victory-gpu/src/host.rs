@@ -73,14 +73,17 @@ unsafe impl Sync for Host {}
 /// This primitive is deliberately not wired into submission yet: the current
 /// runtime still performs synchronous waits and its title-memory copy-back
 /// must be moved behind the same fence before asynchronous submission is safe.
+#[cfg(test)]
 const MAX_IN_FLIGHT_SUBMISSIONS: usize = 2;
 
+#[cfg(test)]
 struct FenceRetirement<T> {
     pending: VecDeque<(u64, T)>,
     capacity: usize,
     last_submitted: u64,
 }
 
+#[cfg(test)]
 impl<T> FenceRetirement<T> {
     fn new(capacity: usize) -> Self {
         Self {
