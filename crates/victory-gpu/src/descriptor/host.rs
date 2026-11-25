@@ -519,6 +519,16 @@ impl HostHeap {
     /// so destroying the title's heap cannot free a resource still named by
     /// a recorded (but not yet submitted) command list.
     pub(crate) fn keep_with_list(&self, list: &crate::host::HostList) {
+        list.keep(&self.heap);
+        if let Some((buffer, _)) = &self.strides {
+            list.keep(buffer);
+        }
+        if let Some((buffer, _)) = &self.marks {
+            list.keep(buffer);
+        }
+        if let Some((buffer, _, _)) = self.addresses.get().and_then(Option::as_ref) {
+            list.keep(buffer);
+        }
         list.keep_owner(self.kept.clone());
     }
 
@@ -550,7 +560,7 @@ impl HostHeap {
 
     /// The host address of the slots' view addresses (see the field), made
     /// on first use from the slots made so far.
-    pub(crate) fn view_addresses(&self) -> Option<u64> {
+    pub(crate) fn view_addresses(&self, list: &crate::host::HostList) -> Option<u64> {
         let made = self.addresses.get_or_init(|| {
             let (buffer, data) = host()?.upload_buffer(u64::from(self.count) * 8)?;
             crate::host::name(&buffer, || "view addresses".into());
@@ -564,6 +574,9 @@ impl HostHeap {
             let gpu = unsafe { buffer.GetGPUVirtualAddress() };
             Some((buffer, data, gpu))
         });
+        if let Some((buffer, _, _)) = made.as_ref() {
+            list.keep(buffer);
+        }
         made.as_ref().map(|m| m.2)
     }
 
