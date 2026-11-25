@@ -322,6 +322,8 @@ impl Staging {
         }
         if !committed(self.memory, size) {
             #[cfg(feature = "diagnostics")]
+            crate::copystat::add(crate::copystat::C::TexUncommitted, 1);
+            #[cfg(feature = "diagnostics")]
             tracing::debug!(
                 memory = ?self.memory,
                 size,
@@ -436,6 +438,8 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
     let (memory, desc) = crate::resource::texture_memory(resource)?;
     let Some(layout) = crate::resource::texture_layout(&desc).map(|t| t.planes[0].layout.clone())
     else {
+        #[cfg(feature = "diagnostics")]
+        crate::copystat::add(crate::copystat::C::TexNoLayout, 1);
         once!(
             ?desc,
             "texture contents without a console layout not uploaded"
@@ -443,6 +447,8 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
         return None;
     };
     if layout.desc.swizzle.xor() {
+        #[cfg(feature = "diagnostics")]
+        crate::copystat::add(crate::copystat::C::TexXorSwizzle, 1);
         once!(?desc, "texture contents in an XOR mode not uploaded");
         return None;
     }
