@@ -88,8 +88,8 @@ This package contains the diagnostics-enabled VIctory runtime. It still needs
 your own legally obtained title files; no game data is included.
 
 Open PowerShell in this extracted folder, then run:
-    $env:VICTORY_D3D12_DRED = '1'
-    $env:VICTORY_GPU_TIMING = '1'
+    `$env:VICTORY_D3D12_DRED = '1'
+    `$env:VICTORY_GPU_TIMING = '1'
     .\scripts\Run-VIctory.ps1 -GameDir 'D:\YourGameFiles' -GameExe 'YourTitle.exe'
 
 Diagnostics and timing can reduce performance. Keep the console output and
