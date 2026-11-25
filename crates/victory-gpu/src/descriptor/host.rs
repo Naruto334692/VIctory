@@ -1548,6 +1548,65 @@ mod tests {
         assert_eq!(heap.dynamic(40), Some(4 + heap.dynamic - 40));
     }
 
+    /// Destroying the title's descriptor heap after a list records it
+    /// must not release the resources its host slots name. The list resets
+    /// only after its last submission has completed.
+    #[test]
+    fn slot_resources_outlive_the_heap_until_the_list_resets() {
+        let Some(host) = host() else {
+            return; // no host GPU
+        };
+        let Some(heap) = HostHeap::new(false, 4) else {
+            return;
+        };
+        let list = host.new_list().unwrap();
+        // SAFETY: create a plain committed buffer and inspect its COM count.
+        unsafe {
+            let mut buffer: Option<ID3D12Resource> = None;
+            host.device
+                .CreateCommittedResource(
+                    &D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() },
+                    D3D12_HEAP_FLAG_NONE,
+                    &D3D12_RESOURCE_DESC {
+                        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                        Width: 256,
+                        Height: 1,
+                        DepthOrArraySize: 1,
+                        MipLevels: 1,
+                        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                        ..Default::default()
+                    },
+                    D3D12_RESOURCE_STATE_COMMON,
+                    None,
+                    &mut buffer,
+                )
+                .unwrap();
+            let buffer = buffer.unwrap();
+            let references = |b: &ID3D12Resource| {
+                let raw = windows::core::Interface::as_raw(b);
+                let unknown = &*(raw as *const *const windows::core::IUnknown_Vtbl);
+                ((**unknown).AddRef)(raw);
+                ((**unknown).Release)(raw)
+            };
+            let slot = heap.count + 2;
+            heap.raw_view_at(slot, Some(&buffer), 0, 256, false);
+            assert_eq!(references(&buffer), 2, "caller and descriptor slot");
+            heap.keep_with_list(&list);
+            list.keep(&heap.heap);
+            list.close();
+
+            drop(heap);
+            assert_eq!(
+                references(&buffer),
+                2,
+                "the recorded list still owns the descriptor slot resources"
+            );
+            list.reset();
+            assert_eq!(references(&buffer), 1, "list reset releases its slot registry");
+        }
+    }
+
     #[test]
     fn dynamic_search_can_find_a_run_across_the_cursor() {
         let Some(heap) = HostHeap::new(false, 4) else {
