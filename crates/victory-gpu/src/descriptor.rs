@@ -895,6 +895,7 @@ mod tests {
         let host = crate::host::host().expect("host heap requires a host device");
         let list = host.new_list().expect("a host command list");
         host_heap.keep_with_list(&list);
+        list.close();
 
         // Create a valid sampler record elsewhere, then copy its bytes into
         // the placed heap without invoking a descriptor-creation callback.
