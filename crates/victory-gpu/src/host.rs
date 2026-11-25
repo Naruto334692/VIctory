@@ -703,7 +703,7 @@ impl Deferred {
     fn defer_heap(&mut self, viewed: &std::sync::Arc<crate::bindless::Viewed>, writes: bool) {
         let key = std::sync::Arc::as_ptr(viewed) as usize;
         if let Some(&index) = self.heap_steps.get(&key) {
-            if let Some(Step::Heap(_, access)) = self.copies.get_mut(index) {
+            if let Some(Step::Heap(_, access, _)) = self.copies.get_mut(index) {
                 *access |= writes;
             }
         } else {
@@ -711,7 +711,7 @@ impl Deferred {
             self.copies.push(Step::Heap(
                 viewed.clone(),
                 writes,
-                Arc::new(Mutex::new(HeapWrites::default())),
+                std::sync::Arc::new(Mutex::new(HeapWrites::default())),
             ));
             self.heap_steps.insert(key, index);
             self.refreshed.insert((key, usize::MAX, 0));
