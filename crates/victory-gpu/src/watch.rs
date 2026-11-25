@@ -417,6 +417,17 @@ impl Tracked {
         runs
     }
 
+    /// Re-queues a range after a consumer failed to make a usable copy.
+    /// Pages remain guarded; the next take will return them again.
+    pub(crate) fn retry(&self, from: usize, to: usize) {
+        let (from, to) = (from.max(self.start), to.min(self.end));
+        if from >= to {
+            return;
+        }
+        let mut changed = self.changed.pages();
+        changed.extend(from / PAGE..to.div_ceil(PAGE));
+    }
+
     /// Whether page `page` (a page number) changed since it was taken.
     pub(crate) fn changed(&self, page: usize) -> bool {
         self.changed.pages().contains(&page)
