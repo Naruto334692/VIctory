@@ -1605,8 +1605,15 @@ mod tests {
             let slot = heap.count + 2;
             heap.raw_view_at(slot, Some(&buffer), 0, 256, false);
             assert_eq!(references(&buffer), 2, "caller and descriptor slot");
+
+            let strides = heap.strides.as_ref().unwrap().0.clone();
+            let marks = heap.marks.as_ref().unwrap().0.clone();
+            assert!(heap.view_addresses(&list).is_some());
+            let addresses = heap.addresses.get().unwrap().as_ref().unwrap().0.clone();
             heap.keep_with_list(&list);
-            list.keep(&heap.heap);
+            assert_eq!(references(&strides), 2, "heap and list retain stride table");
+            assert_eq!(references(&marks), 2, "heap and list retain mark table");
+            assert_eq!(references(&addresses), 2, "heap and list retain address table");
             list.close();
 
             drop(heap);
@@ -1615,8 +1622,14 @@ mod tests {
                 2,
                 "the recorded list still owns the descriptor slot resources"
             );
+            assert_eq!(references(&strides), 2, "stride table survives heap destruction");
+            assert_eq!(references(&marks), 2, "mark table survives heap destruction");
+            assert_eq!(references(&addresses), 2, "address table survives heap destruction");
             list.reset();
             assert_eq!(references(&buffer), 1, "list reset releases its slot registry");
+            assert_eq!(references(&strides), 1, "list reset releases the stride table");
+            assert_eq!(references(&marks), 1, "list reset releases the mark table");
+            assert_eq!(references(&addresses), 1, "list reset releases the address table");
         }
     }
 
