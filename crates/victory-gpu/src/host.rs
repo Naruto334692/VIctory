@@ -665,6 +665,9 @@ struct Deferred {
     /// Buffer ranges refreshed since the last title copy (host copy,
     /// address, bytes): refreshing them again would find the same bytes.
     refreshed: std::collections::HashSet<(usize, usize, usize)>,
+    /// Whether any heap-indexed shader in this list writes through each
+    /// descriptor heap. ORed across draws/dispatches before submission.
+    heap_write_access: std::collections::HashMap<usize, bool>,
     /// Textures whose contents the list brings up to date.
     textures: std::collections::HashSet<usize>,
     /// Bottom-of-pipe writes, done once the list has run: address, what,
@@ -980,9 +983,12 @@ impl Host {
                     Step::GpuWrite(shadow, address, len, _) => add_back(shadow, *address, *len),
                     Step::Heap(viewed) => {
                         let key = std::sync::Arc::as_ptr(viewed) as usize;
-                        if let Some(writes) = batch.heap_writes.get(&key) {
-                            for (shadow, address, len) in writes {
-                                add_back(shadow, *address, *len);
+                        let writes = deferred.heap_write_access.get(&key).copied().unwrap_or(false);
+                        if writes {
+                            if let Some(ranges) = batch.heap_writes.get(&key) {
+                                for (shadow, address, len) in ranges {
+                                    add_back(shadow, *address, *len);
+                                }
                             }
                         }
                     }
@@ -1665,10 +1671,16 @@ impl HostList {
     /// Shaders of the list take views from the heap itself
     /// (`crate::bindless`): what the heap's views reach is brought up to
     /// date at submission (once until a title copy intervenes).
-    pub(crate) fn defer_heap(&self, viewed: &std::sync::Arc<crate::bindless::Viewed>) {
+    pub(crate) fn defer_heap(
+        &self,
+        viewed: &std::sync::Arc<crate::bindless::Viewed>,
+        writes: bool,
+    ) {
         let mut deferred = self.deferred();
-        let key = (std::sync::Arc::as_ptr(viewed) as usize, usize::MAX, 0);
-        if deferred.refreshed.insert(key) {
+        let key = std::sync::Arc::as_ptr(viewed) as usize;
+        let access = deferred.heap_write_access.entry(key).or_insert(false);
+        *access |= writes;
+        if deferred.refreshed.insert((key, usize::MAX, 0)) {
             deferred.copies.push(Step::Heap(viewed.clone()));
         }
     }
@@ -1807,7 +1819,8 @@ impl HostList {
     fn run_deferred(&self, batch: &mut Batch) {
         #[cfg(feature = "diagnostics")]
         use crate::copystat::{C, add};
-        for step in &self.deferred().copies {
+        let deferred = self.deferred();
+        for step in &deferred.copies {
             let started = std::time::Instant::now();
             #[cfg(feature = "diagnostics")]
             let _timed = crate::watch::Timed(
@@ -1879,9 +1892,11 @@ impl HostList {
                     continue;
                 }
                 Step::Heap(viewed) => {
+                    let key = std::sync::Arc::as_ptr(viewed) as usize;
+                    let writes = deferred.heap_write_access.get(&key).copied().unwrap_or(false);
                     crate::bindless::refresh(viewed, |s, a, l, uav| {
                         batch.add(s, a, l);
-                        if uav {
+                        if writes && uav {
                             batch.heap_write(viewed, s, a, l);
                         }
                     });
