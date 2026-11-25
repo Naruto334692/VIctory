@@ -506,10 +506,9 @@ void main(uint3 id : SV_DispatchThreadID) {
     /// The title writes a buffer and a texture, and views of them and of an
     /// output buffer into its heap; a shader reaching them only through the
     /// heap (no table entry names them) reads what the title wrote at
-    /// submission, every round (the title rewrites both each time, as Bink
-    /// rewrites its planes every frame). The output buffer is not read back
-    /// into title memory (`refresh`'s shortcut): it is read from its host
-    /// copy.
+    /// submission, every round. The output buffer's UAV is marked; a deferred
+    /// title write to a different DWORD of the same page after the heap step
+    /// must survive the shader's marked-page copy-back.
     #[test]
     fn heap_views_are_current() {
         let (src, dst) = (resource(1, 256, 1, 0, 1), resource(1, 256, 1, 0, 1));
@@ -538,7 +537,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         let (a, b) = crate::watch::tests::twin_views(2);
         let src = resource_at(a, 1, 256, 1, 0, 1);
         let tex = resource_at(a + PAGE_BYTES, 3, 4, 1, 28, LINEAR);
-        let dst = resource(1, 256, 1, 0, 1);
+        let dst = resource_at(a + 2 * PAGE_BYTES, 1, 256, 1, 0, 1);
         let (_, tex_desc) = crate::resource::texture_memory(tex).unwrap();
         let size = crate::resource::texture_layout(&tex_desc).unwrap().planes[0].layout.size as usize;
         let write = |base: u32, texel: u8| {
@@ -600,15 +599,25 @@ void main(uint3 id : SV_DispatchThreadID) {
                 list.list.SetPipelineState(&pso);
                 list.list.Dispatch(4, 1, 1);
             }
-            list.defer_heap(&heap_host.viewed);
+            list.defer_heap(&heap_host.viewed, true);
+            // Run after the heap's refresh/arming, but before the GPU list:
+            // emulate a title thread changing one DWORD on the same page.
+            let cpu_write_at = dst_bytes as usize + 20 * std::mem::size_of::<u32>();
+            let cpu_write_value = 0xC0DE_0000 | round as u32;
+            list.defer(move || {
+                let _writing = crate::watch::writing(cpu_write_at, std::mem::size_of::<u32>());
+                // SAFETY: the destination buffer belongs to this test.
+                unsafe { (cpu_write_at as *mut u32).write_volatile(cpu_write_value) };
+            });
             list.close();
-            // The title writes after recording, before submitting.
+            // The title writes its SRV and texture after recording, before submitting.
             write(base, texel);
             host.execute(&[&list]);
             let words = out.read_host(dst_bytes as u64, 64);
-            for (i, &v) in words.iter().enumerate() {
-                assert_eq!(v, base + i as u32 + u32::from(texel), "round {round}, dword {i}");
+            for (i, &v) in words.iter().enumerate().take(16) {
+                assert_eq!(v, base + i as u32 + u32::from(texel), "round {round}, GPU dword {i}");
             }
+            assert_eq!(words[20], cpu_write_value, "round {round}, CPU-only dword survives on the same marked page");
         }
     }
     /// The heap registry must preserve whether a merged host-copy range
