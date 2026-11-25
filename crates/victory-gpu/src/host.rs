@@ -643,7 +643,7 @@ enum Step {
     Texture(std::sync::Arc<crate::texture::Staging>),
     /// Brings every buffer range a view heap's views reach up to date
     /// (`crate::bindless`).
-    Heap(std::sync::Arc<crate::bindless::Viewed>),
+    Heap(std::sync::Arc<crate::bindless::Viewed>, bool),
     /// Shaders read title memory through a view heap's page table (the
     /// heap's key, `crate::memory`): the table names every copy, each
     /// brought up to date.
@@ -665,9 +665,8 @@ struct Deferred {
     /// Buffer ranges refreshed since the last title copy (host copy,
     /// address, bytes): refreshing them again would find the same bytes.
     refreshed: std::collections::HashSet<(usize, usize, usize)>,
-    /// Whether any heap-indexed shader in this list writes through each
-    /// descriptor heap. ORed across draws/dispatches before submission.
-    heap_write_access: std::collections::HashMap<usize, bool>,
+    /// Index of each heap's Step::Heap in the current refresh epoch.
+    heap_steps: std::collections::HashMap<usize, usize>,
     /// Textures whose contents the list brings up to date.
     textures: std::collections::HashSet<usize>,
     /// Bottom-of-pipe writes, done once the list has run: address, what,
@@ -685,14 +684,28 @@ struct Deferred {
 }
 
 impl Deferred {
-    /// Records a heap's use once per refresh epoch and accumulates whether
-    /// any shader in this command list writes through that heap.
+    /// Records one heap step per refresh epoch and accumulates writes only
+    /// into that epoch's step. A later CPU/title-memory barrier must not
+    /// retroactively turn an earlier read-only heap use into a writer.
     fn defer_heap(&mut self, viewed: &std::sync::Arc<crate::bindless::Viewed>, writes: bool) {
         let key = std::sync::Arc::as_ptr(viewed) as usize;
-        *self.heap_write_access.entry(key).or_insert(false) |= writes;
-        if self.refreshed.insert((key, usize::MAX, 0)) {
-            self.copies.push(Step::Heap(viewed.clone()));
+        if let Some(&index) = self.heap_steps.get(&key) {
+            if let Some(Step::Heap(_, access)) = self.copies.get_mut(index) {
+                *access |= writes;
+            }
+        } else {
+            let index = self.copies.len();
+            self.copies.push(Step::Heap(viewed.clone(), writes));
+            self.heap_steps.insert(key, index);
+            self.refreshed.insert((key, usize::MAX, 0));
         }
+    }
+
+    /// A copy into title memory or a run that may write it ends this
+    /// refresh epoch. The next use of a heap gets a distinct Step::Heap.
+    fn end_refresh_epoch(&mut self) {
+        self.refreshed.clear();
+        self.heap_steps.clear();
     }
 }
 
@@ -834,7 +847,7 @@ impl Host {
                     .copies
                     .iter()
                     .filter_map(|s| match s {
-                        Step::Heap(v) => Some(v.clone()),
+                        Step::Heap(v, _) => Some(v.clone()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -993,10 +1006,9 @@ impl Host {
             for step in &deferred.copies {
                 match step {
                     Step::GpuWrite(shadow, address, len, _) => add_back(shadow, *address, *len),
-                    Step::Heap(viewed) => {
+                    Step::Heap(viewed, writes) => {
                         let key = std::sync::Arc::as_ptr(viewed) as usize;
-                        let writes = deferred.heap_write_access.get(&key).copied().unwrap_or(false);
-                        if writes {
+                        if *writes {
                             if let Some(ranges) = batch.heap_writes.get(&key) {
                                 for (shadow, address, len) in ranges {
                                     add_back(shadow, *address, *len);
@@ -1636,7 +1648,7 @@ impl HostList {
         deferred
             .copies
             .push(Step::Copy(dst as usize, src as usize, len));
-        deferred.refreshed.clear();
+        deferred.end_refresh_epoch();
     }
 
     /// Copies `len` bytes of title memory at `src` into the list's upload
@@ -1804,8 +1816,9 @@ impl HostList {
     /// Runs `work` when the list is submitted, in order with its copies.
     /// `work` may write title memory (refreshes after it copy again).
     pub(crate) fn defer(&self, work: impl Fn() + Send + 'static) {
-        self.deferred().copies.push(Step::Run(Box::new(work)));
-        self.deferred().refreshed.clear();
+        let mut deferred = self.deferred();
+        deferred.copies.push(Step::Run(Box::new(work)));
+        deferred.end_refresh_epoch();
     }
 
     /// As [`HostList::defer`], for work that writes only host memory.
@@ -1837,7 +1850,7 @@ impl HostList {
                     Step::Run(_) | Step::Host(_) => C::StepWorkUs,
                     Step::GpuWrite(..) => C::StepGpuWriteUs,
                     Step::Texture(_) => C::StepTextureUs,
-                    Step::Heap(_) => C::StepHeapUs,
+                    Step::Heap(..) => C::StepHeapUs,
                     Step::Memory(_) => C::StepMemoryUs,
                 },
             );
@@ -1897,12 +1910,10 @@ impl HostList {
                     }
                     continue;
                 }
-                Step::Heap(viewed) => {
-                    let key = std::sync::Arc::as_ptr(viewed) as usize;
-                    let writes = deferred.heap_write_access.get(&key).copied().unwrap_or(false);
+                Step::Heap(viewed, writes) => {
                     crate::bindless::refresh(viewed, |s, a, l, uav| {
                         batch.add(s, a, l);
-                        if writes && uav {
+                        if *writes && uav {
                             batch.heap_write(viewed, s, a, l);
                         }
                     });
@@ -2978,25 +2989,30 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
     use super::Batch;
     use std::sync::Arc;
 
-    /// Multiple heap-indexed draws/dispatches in one command list need one
-    /// heap refresh, but the write declaration is the OR of every draw:
-    /// a later writer must not be hidden by an earlier read-only shader.
+    /// Multiple heap-indexed draws/dispatches in one refresh epoch share one
+    /// step and OR their write use; a title-memory barrier ends that epoch,
+    /// so a later writer cannot retroactively change the earlier read-only step.
     #[test]
-    fn heap_write_usage_accumulates_across_draws() {
+    fn heap_write_usage_accumulates_only_within_refresh_epoch() {
         use super::{Deferred, Step};
         use std::sync::Arc;
         let viewed = Arc::new(crate::bindless::Viewed::default());
-        let key = Arc::as_ptr(&viewed) as usize;
         let mut deferred = Deferred::default();
         deferred.defer_heap(&viewed, false);
         deferred.defer_heap(&viewed, false);
-        assert_eq!(deferred.copies.len(), 1, "one heap step per refresh epoch");
-        assert!(!deferred.heap_write_access[&key], "read-only draws stay read-only");
         deferred.defer_heap(&viewed, true);
+        assert_eq!(deferred.copies.len(), 1, "one step in an epoch");
+        assert!(matches!(&deferred.copies[0], Step::Heap(heap, true) if Arc::ptr_eq(heap, &viewed)));
+        deferred.end_refresh_epoch();
         deferred.defer_heap(&viewed, false);
-        assert_eq!(deferred.copies.len(), 1, "later draws reuse the heap step");
-        assert!(deferred.heap_write_access[&key], "any heap writer arms UAV ranges");
-        assert!(matches!(&deferred.copies[0], Step::Heap(heap) if Arc::ptr_eq(heap, &viewed)));
+        deferred.defer_heap(&viewed, false);
+        assert_eq!(deferred.copies.len(), 2, "barrier starts another epoch");
+        assert!(matches!(&deferred.copies[0], Step::Heap(heap, true) if Arc::ptr_eq(heap, &viewed)));
+        assert!(matches!(&deferred.copies[1], Step::Heap(heap, false) if Arc::ptr_eq(heap, &viewed)));
+        deferred.end_refresh_epoch();
+        deferred.defer_heap(&viewed, true);
+        assert_eq!(deferred.copies.len(), 3);
+        assert!(matches!(&deferred.copies[2], Step::Heap(heap, true) if Arc::ptr_eq(heap, &viewed)));
     }
     #[test]
     fn a_texture_is_checked_once_per_submission() {
