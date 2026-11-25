@@ -198,9 +198,11 @@ fn root_view(list: &HostList, address: u64, srv: bool, uav: bool) -> Option<u64>
     {
         static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         static LOGGED: AtomicU64 = AtomicU64::new(0);
-        if *TRACE.get_or_init(|| {
-            std::env::var_os("VICTORY_TRACE_ROOT_VIEWS").is_some()
-        }) && LOGGED.fetch_add(1, Ordering::Relaxed) < 1_000
+        if (srv || uav || gpu % 256 == 0)
+            && *TRACE.get_or_init(|| {
+                std::env::var_os("VICTORY_TRACE_ROOT_VIEWS").is_some()
+            })
+            && LOGGED.fetch_add(1, Ordering::Relaxed) < 1_000
         {
             tracing::info!(
                 target: "victory_gpu::root_view",
