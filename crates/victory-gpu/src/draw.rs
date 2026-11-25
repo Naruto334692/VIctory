@@ -581,7 +581,7 @@ impl State {
                 .then(|| crate::descriptor::heap(self.heaps[0] as This).host())
                 .flatten()
             {
-                list.defer_heap(&host.viewed);
+                list.defer_heap(&host.viewed, writes);
             }
             crate::bindless::note_draw(writes);
         }
