@@ -704,15 +704,15 @@ impl Deferred {
     fn defer_heap(&mut self, viewed: &std::sync::Arc<crate::bindless::Viewed>, writes: bool, marks: bool) {
         let key = std::sync::Arc::as_ptr(viewed) as usize;
         if let Some(&index) = self.heap_steps.get(&key) {
-            if let Some(Step::Heap(_, access, marked, _)) = self.copies.get_mut(index) {
-                if writes {
-                    if *access {
-                        *marked &= marks;
-                    } else {
-                        *marked = marks;
-                    }
-                    *access = true;
+            if let Some(Step::Heap(_, access, marked, _)) = self.copies.get_mut(index)
+                && writes
+            {
+                if *access {
+                    *marked &= marks;
+                } else {
+                    *marked = marks;
                 }
+                *access = true;
             }
         } else {
             let index = self.copies.len();
