@@ -35,8 +35,7 @@ Write-Section "GPU adapters" (Get-CimInstance Win32_VideoController |
 
 try {
     $counter = Get-Counter -Counter '\Memory\Committed Bytes','\Memory\Commit Limit' -ErrorAction Stop
-    Write-Section "Memory counters (instantaneous)" $counter.CounterSamples |
-        Select-Object Path, CookedValue
+    Write-Section "Memory counters (instantaneous)" ($counter.CounterSamples | Select-Object Path, CookedValue)
 } catch {
     Add-Content -Path $summaryPath -Value ("Memory performance counters unavailable: " + $_.Exception.Message)
 }
