@@ -497,6 +497,39 @@ mod tests {
     }
 
     #[test]
+    fn subresource_len_handles_zero_extremes_and_overflow() {
+        // Empty subresources and offsets beyond the allocation must never
+        // produce a slice length, even when the requested footprint is huge.
+        assert_eq!(subresource_len(0, 0, u32::MAX, u32::MAX, u64::MAX), 0);
+        assert_eq!(subresource_len(0, usize::MAX, u32::MAX, u32::MAX, 4096), 4096);
+        assert_eq!(subresource_len(4097, 256, 4, 1, 4096), 0);
+        assert_eq!(subresource_len(u64::MAX, 256, 4, 1, 4096), 0);
+        assert_eq!(subresource_len(0, 256, 0, u32::MAX, 4096), 0);
+        assert_eq!(subresource_len(0, 256, 4, 0, 4096), 0);
+
+        // Exercise a broad range of offsets, pitches, rows and depths. The
+        // result must always fit in the remaining allocation and must not
+        // wrap when the padded footprint overflows usize.
+        for total in [0, 1, 255, 256, 4095, 4096, u64::MAX] {
+            for offset in [0, 1, 255, 256, 4095, 4096, u64::MAX] {
+                for pitch in [0, 1, 255, 256, usize::MAX] {
+                    for rows in [0, 1, 4, u32::MAX] {
+                        for depth in [0, 1, 2, u32::MAX] {
+                            let len = subresource_len(offset, pitch, rows, depth, total);
+                            let remaining = usize::try_from(total.saturating_sub(offset))
+                                .unwrap_or(usize::MAX);
+                            assert!(len <= remaining);
+                            if offset >= total || rows == 0 || depth == 0 || pitch == 0 {
+                                assert_eq!(len, 0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn committed_rejects_overflow_and_noaccess_pages() {
         use windows_sys::Win32::System::Memory::{
             MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE, VirtualAlloc,
