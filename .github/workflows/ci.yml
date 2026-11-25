@@ -31,3 +31,7 @@ jobs:
       # Includes xtask's repository_passes_policy, the asset-policy check.
       - name: Tests
         run: cargo test --workspace --locked
+      - name: Synthetic world-frame preparing benchmark (WARP)
+        env:
+          VICTORY_D3D12_WARP: "1"
+        run: cargo test --profile diag -p victory-gpu --features diagnostics -- --ignored --nocapture --test-threads 1 world_frame_preparing
