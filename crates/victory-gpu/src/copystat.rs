@@ -37,6 +37,8 @@ pub(crate) enum C {
     TexWatched,
     TexHashed,
     TexChanged,
+    /// Texture subresources whose detiling failed; their staging upload was withheld.
+    TexDetileFailures,
     /// Time in the kernel's write-watch answers, in the view check of the
     /// guard, in protecting; bytes and time of copies of memory neither
     /// watched nor guarded (copied whole).
@@ -95,7 +97,7 @@ pub(crate) enum C {
     MarkedKept,
     SavedPages,
 }
-const COUNTERS: usize = 57;
+const COUNTERS: usize = 58;
 static COUNT: [AtomicU64; COUNTERS] = [const { AtomicU64::new(0) }; COUNTERS];
 
 pub(crate) fn add(c: C, n: u64) {
@@ -218,7 +220,7 @@ pub(crate) fn log(frames: f64) {
          {:.0} skipped {:.1} MB; {:.0} runs {:.1} ms; {:.0} queries {:.2} ms, moves {:.2} ms, \
          {:.2} MB unmapped; {:.0} page faults; {:.0} watches {:.2} ms, {:.1} MB checked, {:.1} MB \
          unchanged; {:.1} fallbacks; {:.0} guard faults; textures {:.1} MB watched and \
-         changed, {:.1} MB hashed, {:.1} MB of them changed; watch time: kernel {:.1} ms, view queries {:.1} ms, protecting {:.1} ms; copied whole (not tracked) {:.1} MB in {:.1} ms; snapshots {:.1} MB in {:.1} ms; page faults {:.0} preparing, {:.0} copying back; {:.0} tracked pages marked through another mapping; \
+         changed, {:.1} MB hashed, {:.1} MB of them changed; {:.0} detile failures; watch time: kernel {:.1} ms, view queries {:.1} ms, protecting {:.1} ms; copied whole (not tracked) {:.1} MB in {:.1} ms; snapshots {:.1} MB in {:.1} ms; page faults {:.0} preparing, {:.0} copying back; {:.0} tracked pages marked through another mapping; \
          guards: {:.2} ms in the handler, {:.0} protect calls for {:.0} pages, {:.0} pages opened; \
          {:.0} tracked pages written ({:.0} of them the frame before too); change checks: {:.1} ms \
          asking for other mappings, {:.1} ms waiting for the guard lock; preparing: {:.1} ms in \
@@ -249,6 +251,7 @@ pub(crate) fn log(frames: f64) {
         mb(c[C::TexWatched as usize]),
         mb(c[C::TexHashed as usize]),
         mb(c[C::TexChanged as usize]),
+        c[C::TexDetileFailures as usize],
         ms(c[C::KernelUs as usize]),
         ms(c[C::ViewQueryUs as usize]),
         ms(c[C::ProtectUs as usize]),
