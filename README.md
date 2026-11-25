@@ -97,6 +97,12 @@ and point `VICTORY_FIDELITYFX_DIR` (or `[paths].fidelityfx_dir`) at its
 `amd_fidelityfx_upscaler_dx12.dll`. Without it, or if that DLL offers no
 upscaler for your GPU (the log says so), the title's own DLLs run.
 
+The DXGI output-mode list offers 1920x1080, 2560x1440 and 3840x2160 at
+60 Hz. This is mode enumeration, not a forced internal render resolution;
+the title may keep its own render-target size. A 60 FPS target is not yet
+guaranteed: the title controls its frame pacing, and the menu currently runs
+at 30 FPS. User-selectable graphics presets are not yet connected.
+
 The window caption shows the framerate. Saves, settings and `crashes.log`
 are kept under the data folder (default `%LOCALAPPDATA%\victory\data`), derived
 data under the cache folder.
