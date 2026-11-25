@@ -614,10 +614,16 @@ void main(uint3 id : SV_DispatchThreadID) {
             write(base, texel);
             host.execute(&[&list]);
             let words = out.read_host(dst_bytes as u64, 64);
+            // SAFETY: the GPU fence has completed; this test owns the
+            // destination's 256-byte title-memory allocation.
+            let title_words = unsafe { std::slice::from_raw_parts(dst_bytes.cast_const().cast::<u32>(), 64) };
             for (i, &v) in words.iter().enumerate().take(16) {
-                assert_eq!(v, base + i as u32 + u32::from(texel), "round {round}, GPU dword {i}");
+                let expected = base + i as u32 + u32::from(texel);
+                assert_eq!(v, expected, "round {round}, host GPU dword {i}");
+                assert_eq!(title_words[i], expected, "round {round}, title GPU dword {i}");
             }
-            assert_eq!(words[20], cpu_write_value, "round {round}, CPU-only dword survives on the same marked page");
+            assert_eq!(words[20], cpu_write_value, "round {round}, host CPU-only dword survives");
+            assert_eq!(title_words[20], cpu_write_value, "round {round}, title CPU-only dword survives on the same page");
         }
     }
     /// The heap registry must preserve whether a merged host-copy range
