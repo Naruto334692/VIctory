@@ -823,11 +823,14 @@ impl State {
         let shadow = crate::shadow::find(address, 1)?;
         let offset = u32::try_from(shadow.offset(address)).ok()?;
         let available = shadow.left(address);
+        #[cfg(feature = "diagnostics")]
         let (copy_start, copy_bytes) = shadow.range();
         // D3D12 raw buffer views are capped at 2^27 DWORD elements by
         // HostHeap::raw_view_at; log the actual descriptor extent, not the
         // potentially larger backing allocation.
+        #[cfg(feature = "diagnostics")]
         let view_bytes = (copy_bytes / 4).clamp(1, 1 << 27) * 4;
+        #[cfg(feature = "diagnostics")]
         let view_remaining = view_bytes.saturating_sub(u64::from(offset));
         let marked = shadow.marked();
         let writeback = if uav {
