@@ -13,6 +13,8 @@ The module-level contract explicitly says:
 
 The `staging` path selects `t.planes[0].layout`. It then rejects a layout whose swizzle reports `xor()`, logging that texture contents in an XOR mode are not uploaded. The format/layout mapping in `crates/victory-gpu/src/resource.rs` maps console depth formats 118-120 to PC formats 45-47, but this mapping alone does not implement upload of every plane.
 
+A further format audit found an important conversion constraint: console formats 118-120 store depth in a 16-bit plane and stencil in a separate 8-bit plane. The host D3D12 footprint model uses a 32-bit `R32_TYPELESS` depth plane and an 8-bit `R8_TYPELESS` stencil plane. Therefore, a future plane-aware implementation must convert depth values into the host representation; directly copying the console depth bytes into the D3D12 depth footprint would be incorrect. A new unit test locks down the console/host element-width mismatch for all three formats.
+
 Potential visible consequences to investigate (not yet proven): missing/incorrect depth or stencil sampling, incomplete depth-dependent effects, and missing or incorrect textures for assets using XOR layouts.
 
 ### Current diagnostics
