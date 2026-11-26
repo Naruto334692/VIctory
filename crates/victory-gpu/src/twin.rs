@@ -9,9 +9,12 @@
 //! a list where it records the change (`HostList::transition`), and at
 //! submission for each list's first use, from the side the lists before it
 //! left newer. A 16-bit depth plane in the host's 24-bit one (the
-//! console's 16-bit depth with stencil) is converted on the way, so a
-//! value written as 16-bit depth compares equal to the same depth
-//! rasterised.
+//! console's 16-bit depth with stencil) is converted on the way. That
+//! preserves the stored value, but it does not guarantee the console's
+//! 16-bit depth-equality semantics: a host D24 rasterizer retains eight
+//! more depth bits, so values that compare equal after D16 quantization
+//! can fail `EQUAL` on D24. A separate host-D16/stencil texture path is
+//! being evaluated; see `docs/confirmed-rendering-gaps.md`.
 //!
 //! shortcut: uses the lists do not name (shaders indexing the heap
 //! themselves) move nothing; a whole twin is copied for any use of either
