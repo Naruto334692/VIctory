@@ -84,7 +84,7 @@ Implemented on the current PR branch:
 
 This closes the earlier silent early-return/retry gap in the inspected code. It does not prove that every detile layout is supported or that the game-world defects are fixed.
 
-## 3. Pipeline warm-up and load stalls
+## 4. Pipeline warm-up and load stalls
 
 Sources: `crates/victory-gpu/src/pipeline/make.rs` and `crates/victory-gpu/src/pipeline/library.rs`.
 
@@ -95,15 +95,16 @@ Sources: `crates/victory-gpu/src/pipeline/make.rs` and `crates/victory-gpu/src/p
 
 Required measurements: pipeline cache bytes and load duration, hit/miss/reject counts, queue depth, worker count, time spent waiting on a pipeline in the title thread, and first-use pipeline creation time. Separate cold-cache and warm-cache runs.
 
-## 4. Priority order
+## 5. Priority order
 
 1. Capture the same broken world scene and correlate texture rejection counters with the actual texture descriptors.
-2. Add descriptor-level diagnostics and determine whether missing depth/stencil planes or unsupported XOR layouts affect visible assets.
-3. Implement and test plane-aware depth/stencil uploads using verified console-to-host plane mappings.
-4. Implement XOR swizzle only with correct hardware configuration and verified address vectors.
-5. Measure cold/warm pipeline behavior and world-load stages; optimize only after correctness is established.
+2. Trace the format-118 material-depth target: its R16/R8 UAV writes, later DSV bindings, depth comparison function, and the lighting target written by those draws.
+3. Prototype host-D16 with detached stencil only behind an explicit diagnostic switch; complete the depth/stencil view, clear, copy, barrier, and PSO-format paths before enabling it.
+4. Implement and test plane-aware CPU texture uploads using verified console-to-host plane mappings; do not mistake this for the separate GPU-written UAV path.
+5. Implement XOR swizzle only with correct pipe/bank configuration and verified address vectors.
+6. Measure cold/warm pipeline behavior and world-load stages; optimize only after correctness is established.
 
-## 5. Acceptance criteria
+## 6. Acceptance criteria
 
 - No silently skipped texture class in the tested scene: each is uploaded correctly or logged with a precise unsupported reason.
 - A failed mip conversion cannot be copied to the host as a complete texture, and dirty tracking permits retry.
