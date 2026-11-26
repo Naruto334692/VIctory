@@ -97,6 +97,19 @@ and point `VICTORY_FIDELITYFX_DIR` (or `[paths].fidelityfx_dir`) at its
 `amd_fidelityfx_upscaler_dx12.dll`. Without it, or if that DLL offers no
 upscaler for your GPU (the log says so), the title's own DLLs run.
 
+The existing FidelityFX bridge can serve the title's FSR upscaler from a
+user-provided PC FidelityFX SDK DLL; the title controls the requested FSR
+mode. VIctory does not yet expose manual FSR quality controls. NVIDIA DLSS
+is not implemented yet: it requires a separate NGX/Streamline backend and
+a reliable D3D12 render-frame hook. See
+[FSR/DLSS integration status and requirements](docs/upscaling-fsr-dlss.md).
+
+The DXGI output-mode list offers 1920x1080, 2560x1440 and 3840x2160 at
+60 Hz. This is mode enumeration, not a forced internal render resolution;
+the title may keep its own render-target size. A 60 FPS target is not yet
+guaranteed: the title controls its frame pacing, and the menu currently runs
+at 30 FPS. User-selectable graphics presets are not yet connected.
+
 The window caption shows the framerate. Saves, settings and `crashes.log`
 are kept under the data folder (default `%LOCALAPPDATA%\victory\data`), derived
 data under the cache folder.
@@ -185,6 +198,7 @@ The on/off switches below (`...=1`) are off when unset or set to `0`.
 | `VICTORY_SKIP_PIPELINES=<hash>,...` | omit draws and dispatches, including indirect ones, whose pipeline contains a listed 16-digit shader hash |
 | `VICTORY_GPU_TIMING=1` | with the above, each list of a submission run and timed on its own; slow lists logged with their slowest commands; a device removal names the list it happened in and lists all its commands |
 | `VICTORY_TRACE_SHADERS=<hash>,...` | with `VICTORY_D3D12_DRED`, every draw and dispatch of a listed shader logged with what it binds (user data, heap slots, root views and their first dwords; the first 500) |
+| `VICTORY_TRACE_ROOT_VIEWS=1` | diagnostics build: log up to 1,000 root GPU-VA bindings across legacy direct binds and translated bounded SRV/UAV views, including title/host addresses, copy extent, byte offset, refreshed range and UAV write-back range |
 | `VICTORY_D3D12_WARP=1` | host device on the software adapter (slow; cannot reset the driver) |
 | `VICTORY_PIPELINE_LOG=<file>` | a line per title pipeline created (key, shaders, state), first used, and made or loaded (library name); `translate --cache --pipelines` writes the last kind too |
 | `VICTORY_PREBUILD_KEYS=<file>` | `translate --cache --pipelines` makes nothing and lists each pack record's key, shaders and state (or why it is skipped) |

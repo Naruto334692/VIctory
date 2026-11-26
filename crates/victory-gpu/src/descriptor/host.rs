@@ -30,7 +30,10 @@ pub(crate) struct HostHeap {
     /// released the resource may still be read, and a freed host resource
     /// read there is a GPU page fault (the console reads stale memory).
     /// With it the view's own copy of title memory, if it has one.
-    kept: Mutex<Vec<Kept>>,
+    /// Shared because command lists may outlive the title heap object:
+    /// descriptor contents must stay alive until every list using the heap
+    /// has been reset after its last submission.
+    kept: std::sync::Arc<Mutex<Vec<Kept>>>,
     /// Where the search for free dynamic slots starts, and which are taken
     /// (by lists not yet reset).
     next: Mutex<(u32, Vec<bool>)>,
@@ -193,7 +196,7 @@ impl HostHeap {
             dynamic: extra,
             sampler,
             made: Mutex::new(vec![0; count as usize]),
-            kept: Mutex::new(vec![None; (count + extra) as usize]),
+            kept: std::sync::Arc::new(Mutex::new(vec![None; (count + extra) as usize])),
             next: Mutex::new((0, vec![false; extra as usize])),
             pairs: Mutex::new((count + extra, Vec::new())),
             pairs_end: match victory_shader::emit::NULL_BUFFER_VIEW {
@@ -511,6 +514,24 @@ impl HostHeap {
         self.marks.as_ref().map(|(buffer, _)| buffer)
     }
 
+    /// Retains the host-side contents of every descriptor slot for a list
+    /// that binds this heap. The list owns this shared registry until reset,
+    /// so destroying the title's heap cannot free a resource still named by
+    /// a recorded (but not yet submitted) command list.
+    pub(crate) fn keep_with_list(&self, list: &crate::host::HostList) {
+        list.keep(&self.heap);
+        if let Some((buffer, _)) = &self.strides {
+            list.keep(buffer);
+        }
+        if let Some((buffer, _)) = &self.marks {
+            list.keep(buffer);
+        }
+        if let Some((buffer, _, _)) = self.addresses.get().and_then(Option::as_ref) {
+            list.keep(buffer);
+        }
+        list.keep_owner(self.kept.clone());
+    }
+
     /// Slot `index` now views `resource` (or nothing of the host's).
     fn keep(&self, index: u32, resource: Kept) {
         let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
@@ -539,7 +560,7 @@ impl HostHeap {
 
     /// The host address of the slots' view addresses (see the field), made
     /// on first use from the slots made so far.
-    pub(crate) fn view_addresses(&self) -> Option<u64> {
+    pub(crate) fn view_addresses(&self, list: &crate::host::HostList) -> Option<u64> {
         let made = self.addresses.get_or_init(|| {
             let (buffer, data) = host()?.upload_buffer(u64::from(self.count) * 8)?;
             crate::host::name(&buffer, || "view addresses".into());
@@ -553,6 +574,9 @@ impl HostHeap {
             let gpu = unsafe { buffer.GetGPUVirtualAddress() };
             Some((buffer, data, gpu))
         });
+        if let Some((buffer, _, _)) = made.as_ref() {
+            list.keep(buffer);
+        }
         made.as_ref().map(|m| m.2)
     }
 
@@ -1535,6 +1559,78 @@ mod tests {
         heap.release(a, 50);
         assert_eq!(heap.dynamic(50), Some(4));
         assert_eq!(heap.dynamic(40), Some(4 + heap.dynamic - 40));
+    }
+
+    /// Destroying the title's descriptor heap after a list records it
+    /// must not release the resources its host slots name. The list resets
+    /// only after its last submission has completed.
+    #[test]
+    fn slot_resources_outlive_the_heap_until_the_list_resets() {
+        let Some(host) = host() else {
+            return; // no host GPU
+        };
+        let Some(heap) = HostHeap::new(false, 4) else {
+            return;
+        };
+        let list = host.new_list().unwrap();
+        // SAFETY: create a plain committed buffer and inspect its COM count.
+        unsafe {
+            let mut buffer: Option<ID3D12Resource> = None;
+            host.device
+                .CreateCommittedResource(
+                    &D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() },
+                    D3D12_HEAP_FLAG_NONE,
+                    &D3D12_RESOURCE_DESC {
+                        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                        Width: 256,
+                        Height: 1,
+                        DepthOrArraySize: 1,
+                        MipLevels: 1,
+                        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                        ..Default::default()
+                    },
+                    D3D12_RESOURCE_STATE_COMMON,
+                    None,
+                    &mut buffer,
+                )
+                .unwrap();
+            let buffer = buffer.unwrap();
+            let references = |b: &ID3D12Resource| {
+                let raw = windows::core::Interface::as_raw(b);
+                let unknown = &*(raw as *const *const windows::core::IUnknown_Vtbl);
+                ((**unknown).AddRef)(raw);
+                ((**unknown).Release)(raw)
+            };
+            let slot = heap.count + 2;
+            heap.raw_view_at(slot, Some(&buffer), 0, 256, false);
+            assert_eq!(references(&buffer), 2, "caller and descriptor slot");
+
+            let strides = heap.strides.as_ref().unwrap().0.clone();
+            let marks = heap.marks.as_ref().unwrap().0.clone();
+            assert!(heap.view_addresses(&list).is_some());
+            let addresses = heap.addresses.get().unwrap().as_ref().unwrap().0.clone();
+            heap.keep_with_list(&list);
+            assert_eq!(references(&strides), 3, "heap, test, and list retain stride table");
+            assert_eq!(references(&marks), 3, "heap, test, and list retain mark table");
+            assert_eq!(references(&addresses), 3, "heap, test, and list retain address table");
+            list.close();
+
+            drop(heap);
+            assert_eq!(
+                references(&buffer),
+                2,
+                "the recorded list still owns the descriptor slot resources"
+            );
+            assert_eq!(references(&strides), 2, "stride table survives heap destruction");
+            assert_eq!(references(&marks), 2, "mark table survives heap destruction");
+            assert_eq!(references(&addresses), 2, "address table survives heap destruction");
+            list.reset();
+            assert_eq!(references(&buffer), 1, "list reset releases its slot registry");
+            assert_eq!(references(&strides), 1, "list reset releases the stride table");
+            assert_eq!(references(&marks), 1, "list reset releases the mark table");
+            assert_eq!(references(&addresses), 1, "list reset releases the address table");
+        }
     }
 
     #[test]

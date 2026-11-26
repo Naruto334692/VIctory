@@ -2137,6 +2137,39 @@ mod tests {
     }
 
     #[test]
+    fn console_depth_stencil_planes_require_depth_conversion_before_host_upload() {
+        // Console formats 118-120 store depth in 16 bits per texel and
+        // stencil in a separate 8-bit plane. The host D3D12 depth plane
+        // footprint is R32_TYPELESS (4 bytes), while stencil is R8_TYPELESS
+        // (1 byte). Plane-aware upload therefore needs an explicit depth
+        // conversion; copying the console depth bytes directly is invalid.
+        for format in 118..=120 {
+            let desc = texture(32, 16, format, 1);
+            let console = texture_layout(&desc).unwrap();
+            assert_eq!(console.planes.len(), 2, "format {format}");
+            assert_eq!(console.planes[0].layout.desc.element_bytes, 2, "format {format}");
+            assert_eq!(console.planes[1].layout.desc.element_bytes, 1, "format {format}");
+
+            let host_format = pc_format(format);
+            assert!((44..=47).contains(&host_format), "format {format}");
+            let host_desc = ResourceDesc { format: host_format, ..desc };
+            let (depth, _, depth_row) = subresource(&host_desc, 0).unwrap();
+            let (stencil, _, stencil_row) = subresource(&host_desc, 1).unwrap();
+            assert_eq!(depth.format, 39, "format {format}");
+            assert_eq!(element(depth.format).unwrap().0, 4, "format {format}");
+            assert_eq!(depth_row, 32 * 4, "format {format}");
+            assert_eq!(stencil.format, 60, "format {format}");
+            assert_eq!(element(stencil.format).unwrap().0, 1, "format {format}");
+            assert_eq!(stencil_row, 32, "format {format}");
+            assert_ne!(
+                console.planes[0].layout.desc.element_bytes as u64,
+                element(depth.format).unwrap().0,
+                "depth bytes must be converted for format {format}"
+            );
+        }
+    }
+
+    #[test]
     fn depth_stencil_footprints_follow_the_pc_plane_order() {
         // Native D3D12 reports the same layout for both depth/stencil families
         // and their view formats. Mips vary fastest, then array slices, then planes.

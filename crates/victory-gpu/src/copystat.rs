@@ -37,6 +37,8 @@ pub(crate) enum C {
     TexWatched,
     TexHashed,
     TexChanged,
+    /// Texture subresources whose detiling failed; their staging upload was withheld.
+    TexDetileFailures,
     /// Time in the kernel's write-watch answers, in the view check of the
     /// guard, in protecting; bytes and time of copies of memory neither
     /// watched nor guarded (copied whole).
@@ -94,8 +96,16 @@ pub(crate) enum C {
     MarkedUs,
     MarkedKept,
     SavedPages,
+    /// Texture upload rejected because no console texture layout was available.
+    TexNoLayout,
+    /// Texture upload rejected because the console layout uses XOR swizzling.
+    TexXorSwizzle,
+    /// Texture memory was not committed/readable when sampled.
+    TexUncommitted,
+    /// Additional console texture data planes (depth/stencil) not uploaded.
+    TexMissingPlanes,
 }
-const COUNTERS: usize = 57;
+const COUNTERS: usize = 62;
 static COUNT: [AtomicU64; COUNTERS] = [const { AtomicU64::new(0) }; COUNTERS];
 
 pub(crate) fn add(c: C, n: u64) {
@@ -218,14 +228,14 @@ pub(crate) fn log(frames: f64) {
          {:.0} skipped {:.1} MB; {:.0} runs {:.1} ms; {:.0} queries {:.2} ms, moves {:.2} ms, \
          {:.2} MB unmapped; {:.0} page faults; {:.0} watches {:.2} ms, {:.1} MB checked, {:.1} MB \
          unchanged; {:.1} fallbacks; {:.0} guard faults; textures {:.1} MB watched and \
-         changed, {:.1} MB hashed, {:.1} MB of them changed; watch time: kernel {:.1} ms, view queries {:.1} ms, protecting {:.1} ms; copied whole (not tracked) {:.1} MB in {:.1} ms; snapshots {:.1} MB in {:.1} ms; page faults {:.0} preparing, {:.0} copying back; {:.0} tracked pages marked through another mapping; \
+         changed, {:.1} MB hashed, {:.1} MB of them changed; {:.0} detile failures; watch time: kernel {:.1} ms, view queries {:.1} ms, protecting {:.1} ms; copied whole (not tracked) {:.1} MB in {:.1} ms; snapshots {:.1} MB in {:.1} ms; page faults {:.0} preparing, {:.0} copying back; {:.0} tracked pages marked through another mapping; \
          guards: {:.2} ms in the handler, {:.0} protect calls for {:.0} pages, {:.0} pages opened; \
          {:.0} tracked pages written ({:.0} of them the frame before too); change checks: {:.1} ms \
          asking for other mappings, {:.1} ms waiting for the guard lock; preparing: {:.1} ms in \
          refresh batches, steps (each with the batch it flushes): refresh {:.1} ms, copy {:.1} ms, \
          work {:.1} ms, GPU writes {:.1} ms, textures {:.1} ms, heaps {:.1} ms, title memory {:.1} ms; \
          heap texture uploads {:.1} ms, state preludes {:.1} ms; copying back compared {:.1} MB          in {:.1} ms; marked pages: {:.0} compared, {:.1} MB written back in {:.1} ms, {:.0} kept the title's, {:.0} saved; working set {:.0} MB, \
-         {:.0} hard faults",
+         {:.0} hard faults; texture skips: no layout {:.0}, XOR swizzle {:.0}, uncommitted memory {:.0}, missing data planes {:.0}",
         c[C::Submissions as usize],
         c[C::Copies as usize],
         mb(c[C::CopyBytes as usize]),
@@ -249,6 +259,7 @@ pub(crate) fn log(frames: f64) {
         mb(c[C::TexWatched as usize]),
         mb(c[C::TexHashed as usize]),
         mb(c[C::TexChanged as usize]),
+        c[C::TexDetileFailures as usize],
         ms(c[C::KernelUs as usize]),
         ms(c[C::ViewQueryUs as usize]),
         ms(c[C::ProtectUs as usize]),
@@ -290,6 +301,10 @@ pub(crate) fn log(frames: f64) {
             let hard = hard_faults();
             (hard - HARD.swap(hard, Relaxed).min(hard)) as f64 / frames
         },
+        c[C::TexNoLayout as usize],
+        c[C::TexXorSwizzle as usize],
+        c[C::TexUncommitted as usize],
+        c[C::TexMissingPlanes as usize],
     );
     let held: Vec<String> = crate::watch::held_times()
         .iter()

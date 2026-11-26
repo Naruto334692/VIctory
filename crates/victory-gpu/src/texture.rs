@@ -15,8 +15,10 @@
 //! shaders that index the heap themselves every texture with a resource
 //! object the heap views (`crate::bindless`); textures the title placed in
 //! memory itself are not made for the heap (see `descriptor::host`). Plane
-//! 0 is uploaded (every mip and array slice), depth and stencil planes are
-//! not.
+//! 0 is uploaded (every mip and array slice); additional depth/stencil
+//! planes and XOR-swizzled layouts are not yet uploaded. Rejected and
+//! incomplete texture descriptors are logged with a bounded per-descriptor
+//! diagnostic so the unsupported classes can be identified in a capture.
 
 use std::sync::{Arc, Mutex};
 
@@ -310,12 +312,19 @@ impl Staging {
             // big pools is too slow to ask page by page.
             last.read.resize(size, 0);
             crate::host::copy_mapped(last.read.as_mut_ptr(), self.memory, size, false);
-            self.detile(&last.read);
+            if !self.detile(&last.read) {
+                // Taking write-watched pages is destructive; re-queue them
+                // so a failed conversion is retried without another title write.
+                t.retry(start, start + size);
+                return (size, false);
+            }
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::TexWatched, size as u64);
             return (size, true);
         }
         if !committed(self.memory, size) {
+            #[cfg(feature = "diagnostics")]
+            crate::copystat::add(crate::copystat::C::TexUncommitted, 1);
             #[cfg(feature = "diagnostics")]
             tracing::debug!(
                 memory = ?self.memory,
@@ -333,15 +342,19 @@ impl Staging {
         if last.hash == Some(hash) {
             return (size, false);
         }
+        if !self.detile(tiled) {
+            // Keep the old hash so these contents are retried next time.
+            return (size, false);
+        }
         last.hash = Some(hash);
-        self.detile(tiled);
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexChanged, size as u64);
         (size, true)
     }
 
     /// Detiles `tiled` (the texture's memory) into the staging buffer.
-    fn detile(&self, tiled: &[u8]) {
+    /// False means a subresource failed and staging must not be published.
+    fn detile(&self, tiled: &[u8]) -> bool {
         #[cfg(feature = "diagnostics")]
         if tiled.iter().all(|&b| b == 0) {
             tracing::debug!(
@@ -365,10 +378,13 @@ impl Staging {
                 self.layout
                     .detile(tiled, mip, slice, linear, pitch, pitch * rows as usize)
             {
-                tracing::warn!(?e, mip, slice, "texture not detiled");
-                return;
+                #[cfg(feature = "diagnostics")]
+                crate::copystat::add(crate::copystat::C::TexDetileFailures, 1);
+                tracing::warn!(?e, mip, slice, "texture not detiled; staging upload withheld");
+                return false;
             }
         }
+        true
     }
 }
 
@@ -413,6 +429,62 @@ pub(crate) fn committed(at: *const u8, len: usize) -> bool {
     true
 }
 
+/// Logs distinct texture upload problems, capped to avoid flooding the
+/// runtime log while a title repeatedly samples the same unsupported texture.
+fn note_texture_issue(
+    reason: &'static str,
+    desc: &crate::resource::ResourceDesc,
+    host_desc: &D3D12_RESOURCE_DESC,
+    layout: Option<&victory_formats::texture::Texture>,
+) {
+    static LOGGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let key = format!(
+        "{reason}|{desc:?}|host:{}:{}x{}x{}:{}:{}:{}",
+        host_desc.Format.0,
+        host_desc.Width,
+        host_desc.Height,
+        host_desc.DepthOrArraySize,
+        host_desc.MipLevels,
+        host_desc.SampleDesc.Count,
+        host_desc.Dimension.0
+    );
+    {
+        let mut logged = LOGGED.lock().unwrap_or_else(|e| e.into_inner());
+        if logged.len() >= 64 || logged.contains(&key) {
+            return;
+        }
+        logged.push(key);
+    }
+    let planes: Vec<_> = layout
+        .map(|texture| {
+            texture
+                .planes
+                .iter()
+                .map(|plane| {
+                    (
+                        plane.offset,
+                        plane.stencil,
+                        plane.layout.desc.element_bytes,
+                        plane.layout.desc.swizzle.0,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    tracing::warn!(
+        reason,
+        ?desc,
+        host_format = host_desc.Format.0,
+        host_width = host_desc.Width,
+        host_height = host_desc.Height,
+        host_depth_or_array = host_desc.DepthOrArraySize,
+        host_mips = host_desc.MipLevels,
+        host_samples = host_desc.SampleDesc.Count,
+        console_planes = ?planes,
+        "sampled texture upload is incomplete or skipped"
+    );
+}
+
 /// The staging state of a title texture's host texture, made on first use
 /// (one for all title textures of its memory).
 fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
@@ -422,21 +494,47 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
         return Some(s.clone());
     }
     let (memory, desc) = crate::resource::texture_memory(resource)?;
-    let Some(layout) = crate::resource::texture_layout(&desc).map(|t| t.planes[0].layout.clone())
-    else {
-        once!(
-            ?desc,
-            "texture contents without a console layout not uploaded"
+    // SAFETY: a live resource.
+    let d = unsafe { texture.GetDesc() };
+    let Some(console_layout) = crate::resource::texture_layout(&desc) else {
+        #[cfg(feature = "diagnostics")]
+        crate::copystat::add(crate::copystat::C::TexNoLayout, 1);
+        note_texture_issue("no console texture layout", &desc, &d, None);
+        return None;
+    };
+    let Some(first_plane) = console_layout.planes.first() else {
+        #[cfg(feature = "diagnostics")]
+        crate::copystat::add(crate::copystat::C::TexNoLayout, 1);
+        note_texture_issue(
+            "console texture layout has no data planes",
+            &desc,
+            &d,
+            Some(&console_layout),
         );
         return None;
     };
+    let missing_planes = console_layout.planes.len().saturating_sub(1);
+    if missing_planes != 0 {
+        #[cfg(feature = "diagnostics")]
+        crate::copystat::add(
+            crate::copystat::C::TexMissingPlanes,
+            missing_planes as u64,
+        );
+        note_texture_issue(
+            "additional console data planes are not uploaded",
+            &desc,
+            &d,
+            Some(&console_layout),
+        );
+    }
+    let layout = first_plane.layout.clone();
     if layout.desc.swizzle.xor() {
-        once!(?desc, "texture contents in an XOR mode not uploaded");
+        #[cfg(feature = "diagnostics")]
+        crate::copystat::add(crate::copystat::C::TexXorSwizzle, 1);
+        note_texture_issue("unsupported XOR swizzle", &desc, &d, Some(&console_layout));
         return None;
     }
     let host = host()?;
-    // SAFETY: a live resource.
-    let d = unsafe { texture.GetDesc() };
     let count = if d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D {
         u32::from(d.MipLevels)
     } else {
@@ -494,6 +592,39 @@ mod tests {
         assert_eq!(subresource_len(0, 256, 4, 1, 784), 784);
         assert_eq!(subresource_len(512, 256, 4, 1, 784), 272);
         assert_eq!(subresource_len(0, 256, 4, 1, 2048), 1024);
+    }
+
+    #[test]
+    fn subresource_len_handles_zero_extremes_and_overflow() {
+        // Empty subresources and offsets beyond the allocation must never
+        // produce a slice length, even when the requested footprint is huge.
+        assert_eq!(subresource_len(0, 0, u32::MAX, u32::MAX, u64::MAX), 0);
+        assert_eq!(subresource_len(0, usize::MAX, u32::MAX, u32::MAX, 4096), 4096);
+        assert_eq!(subresource_len(4097, 256, 4, 1, 4096), 0);
+        assert_eq!(subresource_len(u64::MAX, 256, 4, 1, 4096), 0);
+        assert_eq!(subresource_len(0, 256, 0, u32::MAX, 4096), 0);
+        assert_eq!(subresource_len(0, 256, 4, 0, 4096), 0);
+
+        // Exercise a broad range of offsets, pitches, rows and depths. The
+        // result must always fit in the remaining allocation and must not
+        // wrap when the padded footprint overflows usize.
+        for total in [0, 1, 255, 256, 4095, 4096, u64::MAX] {
+            for offset in [0, 1, 255, 256, 4095, 4096, u64::MAX] {
+                for pitch in [0, 1, 255, 256, usize::MAX] {
+                    for rows in [0, 1, 4, u32::MAX] {
+                        for depth in [0, 1, 2, u32::MAX] {
+                            let len = subresource_len(offset, pitch, rows, depth, total);
+                            let remaining = usize::try_from(total.saturating_sub(offset))
+                                .unwrap_or(usize::MAX);
+                            assert!(len <= remaining);
+                            if offset >= total || rows == 0 || depth == 0 || pitch == 0 {
+                                assert_eq!(len, 0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

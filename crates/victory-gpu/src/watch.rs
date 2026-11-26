@@ -35,6 +35,8 @@
 //! and allocated again while a tracker holds it is not seen.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering::{Acquire, Release};
 use std::sync::{Arc, Mutex};
 
 /// The unit tracked and copied: 64 KiB, the console's page. Finer units
@@ -44,7 +46,32 @@ pub(crate) const PAGE: usize = 64 << 10;
 
 /// The pages a tracker has not taken since they changed, and what it saves
 /// of pages it armed.
-struct Changed(Mutex<BTreeSet<usize>>, Mutex<Saved>);
+struct Changed(Mutex<BTreeSet<usize>>, Mutex<Saved>, AtomicUsize);
+
+/// A tracker's changed pages, locked. Their number is noted when the lock
+/// is given back.
+struct Pages<'a>(std::sync::MutexGuard<'a, BTreeSet<usize>>, &'a AtomicUsize);
+
+impl std::ops::Deref for Pages<'_> {
+    type Target = BTreeSet<usize>;
+    fn deref(&self) -> &BTreeSet<usize> {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Pages<'_> {
+    fn deref_mut(&mut self) -> &mut BTreeSet<usize> {
+        &mut self.0
+    }
+}
+
+impl Drop for Pages<'_> {
+    fn drop(&mut self) {
+        // Still under the lock (the fields drop after this): the number
+        // never lags behind a set another thread has locked since.
+        self.1.store(self.0.len(), Release);
+    }
+}
 
 /// Pages (page numbers) whose bytes a tracker keeps when they are first
 /// written after it took them, and those bytes: while shaders may be
@@ -52,11 +79,56 @@ struct Changed(Mutex<BTreeSet<usize>>, Mutex<Saved>);
 /// copy-back of marked pages).
 #[derive(Default)]
 struct Saved {
-    armed: BTreeSet<usize>,
+    /// The armed pages as runs [first, last), none inside another: a root
+    /// view declares its copy from its address to the end, the world's
+    /// 174 MB heap many times a submission, and a set entry per page cost
+    /// 30 microseconds a declaration.
+    armed: Vec<(usize, usize)>,
+    /// Pages of those runs that are not armed any more.
+    unarmed: BTreeSet<usize>,
     bytes: std::collections::HashMap<usize, Box<[u8]>>,
 }
 
+impl Saved {
+    /// Whether page `page` is armed.
+    fn armed(&self, page: usize) -> bool {
+        // The first run ending after `page` is the only one that can hold it.
+        let i = self.armed.partition_point(|&(_, last)| last <= page);
+        self.armed.get(i).is_some_and(|&(first, _)| first <= page) && !self.unarmed.contains(&page)
+    }
+
+    /// Arms pages `[first, last)`.
+    fn arm(&mut self, first: usize, last: usize) {
+        if first >= last {
+            return;
+        }
+        if !self.unarmed.is_empty() {
+            let pages: Vec<usize> = self.unarmed.range(first..last).copied().collect();
+            for page in pages {
+                self.unarmed.remove(&page);
+            }
+        }
+        // Runs `[lo, hi)` overlap or touch the new one: it replaces them.
+        let lo = self.armed.partition_point(|&(_, b)| b < first);
+        let hi = self.armed.partition_point(|&(a, _)| a <= last);
+        if lo + 1 == hi && self.armed[lo].0 <= first && last <= self.armed[lo].1 {
+            return;
+        }
+        let run = if lo < hi {
+            (self.armed[lo].0.min(first), self.armed[hi - 1].1.max(last))
+        } else {
+            (first, last)
+        };
+        self.armed.splice(lo..hi, [run]);
+    }
+}
+
 impl Changed {
+    /// The changed pages, locked.
+    fn pages(&self) -> Pages<'_> {
+        Pages(self.0.lock().unwrap_or_else(|e| e.into_inner()), &self.2)
+    }
+
     /// Page `page` was taken: what it saved of it is stale.
     fn taken(&self, page: usize) {
         self.1.lock().unwrap_or_else(|e| e.into_inner()).bytes.remove(&page);
@@ -66,7 +138,7 @@ impl Changed {
     /// taken: its bytes now, if armed for it.
     fn save(&self, page: usize) {
         let mut saved = self.1.lock().unwrap_or_else(|e| e.into_inner());
-        if !saved.armed.contains(&page) || saved.bytes.contains_key(&page) {
+        if !saved.armed(page) || saved.bytes.contains_key(&page) {
             return;
         }
         let mut bytes = vec![0u8; PAGE].into_boxed_slice();
@@ -214,7 +286,11 @@ pub(crate) fn track(start: usize, len: usize, views: bool) -> Option<Tracked> {
     install();
     let end = start + len;
     let pages = start / PAGE..end.div_ceil(PAGE);
-    let changed = Arc::new(Changed(Mutex::new(pages.clone().collect()), Mutex::default()));
+    let changed = Arc::new(Changed(
+        Mutex::new(pages.clone().collect()),
+        Mutex::default(),
+        AtomicUsize::new(pages.len()),
+    ));
     let mut g = guards();
     for page in pages {
         g.holders.entry(page).or_default().push(changed.clone());
@@ -297,7 +373,7 @@ impl Tracked {
         let pages: Vec<usize> = {
             #[cfg(feature = "diagnostics")]
             let waited = Timed(std::time::Instant::now(), crate::copystat::C::GuardWaitUs);
-            let changed = self.changed.0.lock().unwrap_or_else(|e| e.into_inner());
+            let changed = self.changed.pages();
             #[cfg(feature = "diagnostics")]
             drop(waited);
             changed.range(from / PAGE..to.div_ceil(PAGE)).copied().collect()
@@ -315,7 +391,7 @@ impl Tracked {
         #[cfg(feature = "diagnostics")]
         let waited = Timed(std::time::Instant::now(), crate::copystat::C::GuardWaitUs);
         let mut g = guards();
-        let mut changed = self.changed.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut changed = self.changed.pages();
         #[cfg(feature = "diagnostics")]
         drop(waited);
         #[cfg(feature = "diagnostics")]
@@ -341,20 +417,36 @@ impl Tracked {
         runs
     }
 
+    /// Re-queues a range after a consumer failed to make a usable copy.
+    /// Pages remain guarded; the next take will return them again.
+    pub(crate) fn retry(&self, from: usize, to: usize) {
+        let (from, to) = (from.max(self.start), to.min(self.end));
+        if from >= to {
+            return;
+        }
+        let mut changed = self.changed.pages();
+        changed.extend(from / PAGE..to.div_ceil(PAGE));
+    }
+
     /// Whether page `page` (a page number) changed since it was taken.
     pub(crate) fn changed(&self, page: usize) -> bool {
-        self.changed
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains(&page)
+        self.changed.pages().contains(&page)
+    }
+
+    /// Whether no page changed since it was taken: every [`Tracked::take`]
+    /// would find nothing. One load, no lock: a submission asks this of
+    /// every host copy many times over, and of the world's few thousand
+    /// nearly all are unchanged each time. A write that lands while this
+    /// is asked counts as landing after it, as with a take.
+    pub(crate) fn unchanged(&self) -> bool {
+        self.changed.2.load(Acquire) == 0
     }
 
     /// The caller made pages (page numbers) of its copy equal to title
     /// memory itself (what shaders wrote went back): taken and guarded.
     pub(crate) fn taken(&self, pages: &[usize]) {
         let mut g = guards();
-        let mut changed = self.changed.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut changed = self.changed.pages();
         let others = aliases(&g, pages);
         guard_aliases(&mut g, &others);
         for page in protect(&mut g, pages) {
@@ -369,20 +461,24 @@ impl Tracked {
     pub(crate) fn arm(&self, from: usize, to: usize) {
         let (from, to) = (from.max(self.start), to.min(self.end));
         if from < to {
-            self.changed.1.lock().unwrap_or_else(|e| e.into_inner()).armed.extend(from / PAGE..to.div_ceil(PAGE));
+            self.changed.1.lock().unwrap_or_else(|e| e.into_inner()).arm(from / PAGE, to.div_ceil(PAGE));
         }
     }
 
     /// Page `page` (a page number) needs no saving any more: its copy-back
     /// is under way.
     pub(crate) fn unarm(&self, page: usize) {
-        self.changed.1.lock().unwrap_or_else(|e| e.into_inner()).armed.remove(&page);
+        let mut saved = self.changed.1.lock().unwrap_or_else(|e| e.into_inner());
+        if saved.armed(page) {
+            saved.unarmed.insert(page);
+        }
     }
 
     /// No shader writes the copy any more: nothing is armed or kept.
     pub(crate) fn disarm(&self) {
         let mut saved = self.changed.1.lock().unwrap_or_else(|e| e.into_inner());
         saved.armed.clear();
+        saved.unarmed.clear();
         saved.bytes.clear();
     }
 
@@ -482,7 +578,7 @@ fn changed_here(g: &mut Guards, first: usize, last: usize, save: bool) -> bool {
     }
     for (&page, holders) in g.holders.range(first..last) {
         for c in holders {
-            let first_write = c.0.lock().unwrap_or_else(|e| e.into_inner()).insert(page);
+            let first_write = c.pages().insert(page);
             if first_write && save {
                 c.save(page);
             }
@@ -709,6 +805,49 @@ pub(crate) mod tests {
         free(p);
     }
 
+    #[test]
+    fn failed_consumer_can_requeue_taken_pages() {
+        let p = pool(2);
+        let t = track(p, 2 * PAGE, true).expect("pool memory is tracked");
+        assert_eq!(t.take(p, p + 2 * PAGE), [(p, p + 2 * PAGE)]);
+        assert!(t.unchanged());
+        t.retry(p, p + 2 * PAGE);
+        assert!(!t.unchanged());
+        assert_eq!(t.take(p, p + 2 * PAGE), [(p, p + 2 * PAGE)]);
+        assert!(t.unchanged());
+        drop(t);
+        free(p);
+    }
+
+    /// A tracker knows without its lock whether any page changed since it
+    /// was taken: not at first, after everything is taken, and not again
+    /// once the title writes (a fault), we or the kernel write (reported),
+    /// or the runtime maps the memory anew.
+    #[test]
+    fn a_tracker_says_when_nothing_changed() {
+        let p = pool(3);
+        let t = track(p, 3 * PAGE, true).expect("pool memory is tracked");
+        assert!(!t.unchanged(), "everything is changed at first");
+        assert_eq!(t.take(p, p + 2 * PAGE), [(p, p + 2 * PAGE)]);
+        assert!(!t.unchanged(), "a page is still to take");
+        assert_eq!(t.take(p, p + 3 * PAGE), [(p + 2 * PAGE, p + 3 * PAGE)]);
+        assert!(t.unchanged());
+        assert!(t.take(p, p + 3 * PAGE).is_empty() && t.unchanged());
+        // SAFETY: a committed page of ours, read-only: the handler opens it.
+        unsafe { ((p + PAGE + 8) as *mut u8).write_volatile(1) };
+        assert!(!t.unchanged(), "a write the guard took");
+        assert_eq!(t.take(p, p + 3 * PAGE), [(p + PAGE, p + 2 * PAGE)]);
+        assert!(t.unchanged());
+        drop(writing(p + 5, 1));
+        assert!(!t.unchanged(), "a write that was reported");
+        t.taken(&[p / PAGE]);
+        assert!(t.unchanged(), "the caller made its copy equal to the page");
+        title_memory_remapped(p + 2 * PAGE, PAGE);
+        assert!(!t.unchanged(), "memory mapped anew");
+        drop(t);
+        free(p);
+    }
+
     /// A page only partly in the range asked is copied in part and stays
     /// changed; edge pages count whole when the tracked part is covered.
     #[test]
@@ -717,12 +856,101 @@ pub(crate) mod tests {
         let t = track(p + 100, 2 * PAGE, true).expect("tracked");
         assert_eq!(t.take(p + 100, p + PAGE + 10), [(p + 100, p + PAGE + 10)]);
         assert!(!t.changed(p / PAGE) && t.changed(p / PAGE + 1));
+        assert!(!t.unchanged(), "a page taken in part stays changed");
         assert_eq!(t.take(p, p + 3 * PAGE), [(p + PAGE, p + 2 * PAGE + 100)]);
         assert!(t.take(p, p + 3 * PAGE).is_empty());
+        assert!(t.unchanged());
         drop(t);
         free(p);
     }
 
+    /// Pages of the ranges armed keep their bytes from before the first
+    /// write after they were taken, whichever overlapping ranges armed
+    /// them; a page unarmed keeps none until it is armed again, and none
+    /// does once the tracker is disarmed.
+    #[test]
+    fn armed_ranges_keep_their_pages_bytes_from_before_the_first_write() {
+        let p = pool(4);
+        let t = track(p, 4 * PAGE, true).expect("pool memory is tracked");
+        let all = || t.take(p, p + 4 * PAGE);
+        // SAFETY: (every write below) a byte of our pool; a guarded page
+        // faults into the handler, which saves it first where it is armed.
+        let write = |page: usize, value: u8| unsafe { ((p + page * PAGE + 8) as *mut u8).write_volatile(value) };
+        let saved = |page: usize| t.saved(p / PAGE + page).map(|bytes| bytes[8]);
+        all();
+        write(0, 1);
+        assert_eq!(saved(0), None, "nothing armed yet");
+        all();
+        // Bytes 100 of page 0 to 1 of page 2: pages 0 to 2, page 3 not.
+        t.arm(p + 100, p + 2 * PAGE + 1);
+        t.arm(p + PAGE, p + 2 * PAGE);
+        t.arm(p + PAGE + 5, p + 2 * PAGE + 1);
+        t.unarm(p / PAGE + 1);
+        for page in 0..4 {
+            write(page, 2);
+        }
+        assert_eq!([saved(0), saved(1), saved(2), saved(3)], [Some(1), None, Some(0), None]);
+        assert_eq!(saved(0), None, "handed out once");
+        all();
+        // Armed again by a range holding it.
+        t.arm(p + PAGE, p + 2 * PAGE);
+        write(1, 3);
+        write(1, 4);
+        assert_eq!(saved(1), Some(2), "from before the first write");
+        t.disarm();
+        all();
+        write(2, 5);
+        assert_eq!(saved(2), None, "disarmed");
+        drop(t);
+        free(p);
+    }
+    /// Runs armed that touch or overlap merge into one, so a page's check
+    /// stays a binary search however many sub-ranges are armed; pages unarmed in
+    /// them stay unarmed until a range holding them is armed again.
+    #[test]
+    fn adjacent_and_overlapping_armed_runs_coalesce() {
+        let mut s = Saved::default();
+        // Adjacent: [2k, 2k + 2) end to end, in order and out of it.
+        for k in 0..200 {
+            s.arm(2 * k, 2 * k + 2);
+        }
+        assert_eq!(s.armed, [(0, 400)]);
+        let mut s = Saved::default();
+        for k in (0..200).rev() {
+            s.arm(2 * k, 2 * k + 2);
+        }
+        assert_eq!(s.armed, [(0, 400)]);
+        // Overlapping, nested and disjoint.
+        let mut s = Saved::default();
+        s.arm(10, 20);
+        s.arm(15, 25);
+        assert_eq!(s.armed, [(10, 25)]);
+        s.arm(12, 14);
+        assert_eq!(s.armed, [(10, 25)], "nested");
+        s.arm(40, 50);
+        s.arm(0, 5);
+        assert_eq!(s.armed, [(0, 5), (10, 25), (40, 50)], "disjoint, sorted");
+        s.arm(5, 10);
+        assert_eq!(s.armed, [(0, 25), (40, 50)], "touching both sides");
+        s.arm(30, 35);
+        s.arm(20, 45);
+        assert_eq!(s.armed, [(0, 50)], "spanning several");
+        s.arm(60, 70);
+        s.arm(55, 55);
+        assert_eq!(s.armed, [(0, 50), (60, 70)], "an empty run arms nothing");
+        assert!(s.armed(0) && s.armed(49) && !s.armed(50) && !s.armed(59));
+        assert!(s.armed(60) && s.armed(69) && !s.armed(70) && !s.armed(1000));
+        // Unarmed pages stay out of a merged run until armed again.
+        s.unarmed.insert(45);
+        s.unarmed.insert(65);
+        s.arm(50, 60);
+        assert_eq!(s.armed, [(0, 70)]);
+        assert!(!s.armed(45) && !s.armed(65) && s.armed(55));
+        s.arm(44, 46);
+        assert!(s.armed(45) && !s.armed(65));
+        s.arm(0, 70);
+        assert!(s.armed(65) && s.unarmed.is_empty());
+    }
     /// Plain committed memory (the C heap) is not tracked; reserved memory
     /// is, reads as taken, and changes when the runtime maps it.
     #[test]

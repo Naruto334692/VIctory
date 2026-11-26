@@ -220,6 +220,22 @@ fn load(dir: &Path) -> Result<(Host, String), String> {
 
 /// The upscaler versions the host DLL offers for the host GPU, by name; an
 /// error if none.
+/// Refuse unreasonable or unrepresentable counts before allocating arrays.
+/// A provider normally reports only a handful of implementations; this is a
+/// defensive bound for malformed or incompatible third-party DLLs.
+const MAX_UPSCALER_VERSIONS: u64 = 64;
+
+fn version_capacity(count: u64) -> Result<usize, String> {
+    if count == 0 {
+        return Err("it offers no upscaler for the host GPU".into());
+    }
+    if count > MAX_UPSCALER_VERSIONS {
+        return Err(format!("it reported an unreasonable number of upscaler versions ({count})"));
+    }
+    usize::try_from(count)
+        .map_err(|_| "the upscaler version count does not fit this platform".into())
+}
+
 fn versions(host: &Host) -> Result<String, String> {
     let mut count = 0u64;
     let mut query = GetVersions {
@@ -235,15 +251,23 @@ fn versions(host: &Host) -> Result<String, String> {
     };
     // SAFETY: a version query naming the host device.
     let code = unsafe { (host.query)(null_mut(), &mut query.header) };
-    if code != OK || count == 0 {
+    if code != OK {
+        return Err(format!("the host upscaler version query failed (code {code})"));
+    }
+    let capacity = version_capacity(count)?;
+    let mut names = vec![null::<c_char>(); capacity];
+    query.names = names.as_mut_ptr();
+    // SAFETY: as above, with room for the reported number of names.
+    let code = unsafe { (host.query)(null_mut(), &mut query.header) };
+    if code != OK {
+        return Err(format!("the host upscaler version list could not be read (code {code})"));
+    }
+    if count > capacity as u64 {
         return Err(format!(
-            "it offers no upscaler for the host GPU (code {code})"
+            "the host upscaler returned {count} versions for a buffer of {capacity}"
         ));
     }
-    let mut names = vec![null::<c_char>(); count as usize];
-    query.names = names.as_mut_ptr();
-    // SAFETY: as above, with room for `count` names.
-    unsafe { (host.query)(null_mut(), &mut query.header) };
+    names.truncate(count as usize);
     Ok(names
         .iter()
         .filter(|n| !n.is_null())
@@ -515,5 +539,17 @@ mod tests {
         assert_eq!(host_state(0x2), Some(0x8));
         assert_eq!(host_state(0x200), Some(0x10));
         assert_eq!(host_state(0x14), None);
+    }
+
+    #[test]
+    fn version_capacity_rejects_empty_and_unreasonable_provider_results() {
+        assert!(version_capacity(0).is_err());
+        assert_eq!(version_capacity(1).unwrap(), 1);
+        assert_eq!(
+            version_capacity(MAX_UPSCALER_VERSIONS).unwrap(),
+            MAX_UPSCALER_VERSIONS as usize
+        );
+        assert!(version_capacity(MAX_UPSCALER_VERSIONS + 1).is_err());
+        assert!(version_capacity(u64::MAX).is_err());
     }
 }

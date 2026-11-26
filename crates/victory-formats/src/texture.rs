@@ -884,6 +884,40 @@ mod tests {
     }
 
     #[test]
+    fn depth_stencil_formats_expose_stencil_plane_separately() {
+        for format in 118..=120 {
+            let texture = Texture::new(&TextureDesc {
+                dimension: Dimension::Tex2d,
+                width: 64,
+                height: 64,
+                depth_or_array: 1,
+                mips: 1,
+                format,
+                samples: 1,
+                swizzle: Swizzle::SW_64KB_D,
+            })
+            .unwrap();
+
+            assert_eq!(texture.planes.len(), 2, "format {format}");
+            assert_eq!(texture.planes[0].offset, 0, "format {format}");
+            assert!(!texture.planes[0].stencil, "format {format}");
+            assert!(texture.planes[1].stencil, "format {format}");
+            assert_eq!(texture.planes[0].layout.desc.element_bytes, 2, "format {format}");
+            assert_eq!(texture.planes[1].layout.desc.element_bytes, 1, "format {format}");
+            assert_eq!(
+                texture.planes[1].offset % texture.planes[1].layout.alignment,
+                0,
+                "format {format}"
+            );
+            assert_eq!(
+                texture.size,
+                texture.planes[1].offset + texture.planes[1].layout.size,
+                "format {format}"
+            );
+        }
+    }
+
+    #[test]
     fn linear_layouts_require_one_sample() {
         let linear = desc(256, 256, 1, 4, Swizzle::LINEAR);
         let single = Layout::new(&linear).unwrap();

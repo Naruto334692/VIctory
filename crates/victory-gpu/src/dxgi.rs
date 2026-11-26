@@ -215,6 +215,7 @@ static FACTORY_FUNCTIONS: Table<32> = {
 
 /// A display mode as the console lists it: size, refresh rate (numerator,
 /// denominator), format, scanline order, scaling, flags.
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct Mode {
     width: u32,
@@ -227,10 +228,17 @@ struct Mode {
 }
 const _: () = assert!(size_of::<Mode>() == 32);
 
-/// The console's mode list: one 4K mode at 60 Hz (Grand Theft Auto VI looks
-/// for a 120 Hz one to allow 120 Hz frame intervals).
-/// shortcut: fixed mode, not the host display's; report the host's rates if
-/// a title paces by them.
+/// Fixed PC-friendly output modes. These are output/display modes, not a
+/// promise that the title renders internally at this resolution: the title
+/// owns its render targets and may keep its own internal resolution.
+/// All modes are progressive at 60 Hz; the host display must still support
+/// the selected mode for the presentation path to use it.
+const OUTPUT_MODES: [Mode; 3] = [
+    Mode { width: 1920, height: 1080, refresh: [60, 1], format: 0, scanlines: 1, scaling: 0, flags: 0 },
+    Mode { width: 2560, height: 1440, refresh: [60, 1], format: 0, scanlines: 1, scaling: 0, flags: 0 },
+    Mode { width: 3840, height: 2160, refresh: [60, 1], format: 0, scanlines: 1, scaling: 0, flags: 0 },
+];
+
 extern "system" fn modes(
     _: This,
     _format: u32,
@@ -242,25 +250,18 @@ extern "system" fn modes(
     let Some(count) = (unsafe { count.as_mut() }) else {
         return E_INVALIDARG;
     };
+    let required = OUTPUT_MODES.len() as u32;
     if out.is_null() {
-        *count = 1;
+        *count = required;
         return S_OK;
     }
-    if *count < 1 {
+    if *count < required {
+        *count = required;
         return MORE_DATA;
     }
-    *count = 1;
-    let mode = Mode {
-        width: 3840,
-        height: 2160,
-        refresh: [60, 1],
-        format: 0,
-        scanlines: 1, // progressive
-        scaling: 0,
-        flags: 0,
-    };
-    // SAFETY: checked non-null; room for `count` >= 1 modes.
-    unsafe { out.write(mode) };
+    *count = required;
+    // SAFETY: caller supplied a non-null array and capacity >= required.
+    unsafe { std::ptr::copy_nonoverlapping(OUTPUT_MODES.as_ptr(), out, OUTPUT_MODES.len()) };
     S_OK
 }
 
@@ -323,6 +324,43 @@ mod tests {
         assert_eq!(outputs(adapter, 0, &mut output), S_OK);
         assert!(!output.is_null());
         assert_eq!(outputs(adapter, 1, &mut output), NOT_FOUND);
+    }
+
+    #[test]
+    fn output_modes_offer_full_hd_2k_and_4k_at_60_hz() {
+        let get_modes = slot::<extern "system" fn(This, u32, u32, *mut u32, *mut Mode) -> HRESULT>(
+            &OUTPUT_OBJECT,
+            0xa8,
+        );
+        let mut count = 0;
+        assert_eq!(get_modes(&OUTPUT_OBJECT, 0, 0, &mut count, std::ptr::null_mut()), S_OK);
+        assert_eq!(count, 3);
+
+        let mut modes = [Mode {
+            width: 0, height: 0, refresh: [0, 0], format: 0,
+            scanlines: 0, scaling: 0, flags: 0,
+        }; 3];
+        assert_eq!(get_modes(&OUTPUT_OBJECT, 0, 0, &mut count, modes.as_mut_ptr()), S_OK);
+        assert_eq!(count, 3);
+        assert_eq!(
+            modes.iter().map(|m| (m.width, m.height, m.refresh)).collect::<Vec<_>>(),
+            vec![(1920, 1080, [60, 1]), (2560, 1440, [60, 1]), (3840, 2160, [60, 1])]
+        );
+    }
+
+    #[test]
+    fn insufficient_mode_buffer_reports_required_capacity() {
+        let get_modes = slot::<extern "system" fn(This, u32, u32, *mut u32, *mut Mode) -> HRESULT>(
+            &OUTPUT_OBJECT,
+            0xa8,
+        );
+        let mut count = 1;
+        let mut mode = Mode {
+            width: 0, height: 0, refresh: [0, 0], format: 0,
+            scanlines: 0, scaling: 0, flags: 0,
+        };
+        assert_eq!(get_modes(&OUTPUT_OBJECT, 0, 0, &mut count, &mut mode), MORE_DATA);
+        assert_eq!(count, 3);
     }
 
     #[test]
