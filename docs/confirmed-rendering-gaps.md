@@ -59,7 +59,7 @@ The current branch is not starting from zero:
 - The R16 depth plane is converted to/from the host D24 plane by a compute pass; the R8 stencil plane is copied separately.
 - UAV writes are therefore routed, but the actual depth-stencil resource and DSV used by rasterization remain D24S8. The conversion does **not** make depth-`EQUAL` behave like D16.
 
-A complete experimental host-D16 implementation has since been committed to the fork's `main` history as upstream commit [`0b9a0f6`](https://github.com/Naruto334692/VIctory/commit/0b9a0f6898ddf1b36983d047b3d9126013dfb39b). The current integration branch is 99 commits behind that history and does not contain this implementation. The reference adds:
+A complete experimental host-D16 implementation has since been committed to the fork's `main` history as upstream commit [`0b9a0f6`](https://github.com/Naruto334692/VIctory/commit/0b9a0f6898ddf1b36983d047b3d9126013dfb39b). The two histories have diverged from merge base `ffe310eb2098e52169f4c44db5ffdabf43a72622`: the reference commit is 99 commits from that base, while the integration branch contains 394 commits from it. This is not a simple 99-commit lag or a safe fast-forward/cherry-pick. The integration branch does not contain this implementation. The reference adds:
 - an opt-in `VICTORY_LOCAL_D16_DEPTH=1` mode mapping formats 118-120 to D16 / R16 views;
 - a separate R8 stencil resource, including stencil SRV/UAV remapping, clears, copies and state tracking;
 - DSV flag handling and pipeline depth-format tracking/diagnostics;
@@ -67,6 +67,22 @@ A complete experimental host-D16 implementation has since been committed to the 
 - a hardware GPU test comparing D16 and D24 depth-`EQUAL` at exact and fractional D16-step offsets, with shader-readable and non-readable depth resources.
 
 This reference is a much stronger basis than inventing a new conversion path. It is not yet integrated into this PR branch, and its test results do not prove the user's current world-rendering failure is caused by this path. Porting must account for the branch's newer descriptor lifetime, bindless, root-view and copy-back changes rather than replacing whole files with older reference snapshots.
+
+### New comparison: exact test result and porting incompatibility
+
+The reference commit's synthetic GPU test is more specific than the earlier summary:
+- It writes 64 depth values through the title-style R16 UAV view and stencil through plane 1.
+- It draws depth-EQUAL probes at both the exact D16 value and a value offset by 0.25 of one D16 step.
+- It runs with the depth target shader-readable and non-shader-readable, then probes depth and stencil readback.
+- The D16 path expects all 64 exact and fractional probes to pass; the D24S8 comparison expects all 64 fractional probes to miss. The commit message reports the probe passing on the author's GPU and WARP with no D3D12 debug-layer messages. This is evidence from the reference commit, not a test run performed on this integration branch or the user's PC.
+
+The integration branch's data model is materially different from the reference:
+- Here, Resource.host points to a shared Arc<HostTexture> obtained through shared_texture; multiple title resources can share one host texture for the same texture memory.
+- Here, HostTexture owns a OnceLock<Option<crate::twin::Twin>>; the current implementation's depth/stencil UAV planes and their conversion/copy routing live in twin.rs.
+- The reference's D16 patch adds per-host-texture stencil, stencil_alone, and clears ownership/state, and its twin implementation is in depth_twin.rs, not this branch's twin.rs.
+- The integration branch also has later bindless, descriptor lifetime, root-view and copy-back code in descriptor/host.rs, host.rs, list.rs, and draw.rs. The reference patch changes all of those areas.
+
+Therefore, the reference's nine-file patch is a behavioral specification and test design, not a directly applicable patch. A safe port must first define ownership of the detached stencil companion for shared texture memory (including aliases with compatible/incompatible descriptions), then thread its lifetime and per-list state through this branch's existing twin routing and descriptor retention. Until that is designed, do not toggle pc_format to D16: doing so alone would mismatch DSV/SRV formats, clears, stencil views, and pipeline DSVFormat, and could silently lose stencil or break aliases.
 
 ### Safe integration requirements
 
