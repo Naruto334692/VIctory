@@ -52,16 +52,32 @@ An upstream GTA VI report on an RTX 3060 Ti described a specific material-lighti
 
 Reference implementation and test report: [lines9686-rgb/VIctory, depth-uav branch](https://github.com/lines9686-rgb/VIctory/tree/depth-uav). This is supporting evidence for a candidate cause, not proof that this exact pass is the cause of the current user's rendering failure.
 
-### Required fix and safeguards
+### Existing branch implementation versus the missing D16 mode
 
-A host-D16 experiment for console formats 118-120 must be a complete resource/view/state path, not only a `pc_format` substitution:
+The current branch is not starting from zero:
+- `twin.rs` already creates separate R16 and R8 unordered-access twin textures for console formats 118-120.
+- The R16 depth plane is converted to/from the host D24 plane by a compute pass; the R8 stencil plane is copied separately.
+- UAV writes are therefore routed, but the actual depth-stencil resource and DSV used by rasterization remain D24S8. The conversion does **not** make depth-`EQUAL` behave like D16.
 
-1. Create a host D16 depth resource and a separate R8 stencil texture; preserve the console's 16-bit depth quantization for rasterized `EQUAL` tests.
-2. Route depth-plane UAV writes through an R16 twin and stencil-plane UAV/SRV/copy/clear operations through the separate R8 texture.
-3. Remap stencil SRVs and UAVs to the separate texture, and remove incompatible read-only-stencil DSV flags.
-4. Update depth clears, stencil clears, texture copies, array/mip subresources, barriers, list retention and state tracking so the detached stencil stays coherent.
-5. Key graphics PSOs by the actual host depth format. A pipeline created for D24 must not be bound to a D16 DSV.
-6. Log (rather than silently pretending to support) draw pipelines that test or write stencil when using the detached-stencil mode; a separate R8 texture cannot participate in the hardware DSV stencil test.
+A complete experimental host-D16 implementation has since been committed to the fork's `main` history as upstream commit [`0b9a0f6`](https://github.com/Naruto334692/VIctory/commit/0b9a0f6898ddf1b36983d047b3d9126013dfb39b). The current integration branch is 99 commits behind that history and does not contain this implementation. The reference adds:
+- an opt-in `VICTORY_LOCAL_D16_DEPTH=1` mode mapping formats 118-120 to D16 / R16 views;
+- a separate R8 stencil resource, including stencil SRV/UAV remapping, clears, copies and state tracking;
+- DSV flag handling and pipeline depth-format tracking/diagnostics;
+- a warning for pipelines that attempt stencil testing/writes, because detached R8 stencil cannot participate in the hardware DSV stencil test;
+- a hardware GPU test comparing D16 and D24 depth-`EQUAL` at exact and fractional D16-step offsets, with shader-readable and non-readable depth resources.
+
+This reference is a much stronger basis than inventing a new conversion path. It is not yet integrated into this PR branch, and its test results do not prove the user's current world-rendering failure is caused by this path. Porting must account for the branch's newer descriptor lifetime, bindless, root-view and copy-back changes rather than replacing whole files with older reference snapshots.
+
+### Safe integration requirements
+
+1. Compare the reference D16 commit's nine changed GPU files against this branch and port only the D16-specific changes.
+2. Keep the mode opt-in; D24 remains the default until same-scene validation succeeds.
+3. Preserve the existing R16/R8 UAV twin behavior when D16 mode is off.
+4. Ensure host resource format, depth SRV format, DSV format, clear values, pipeline `DSVFormat`, and descriptor remapping all agree.
+5. Keep stencil state coherent across UAV writes, shader reads, clears, copies, list transitions and resource lifetime.
+6. Refuse or clearly diagnose draws that require hardware stencil testing while stencil is detached.
+7. Run workspace Clippy/tests, then the reference hardware test on both a physical D3D12 GPU and WARP where supported; require no debug-layer errors.
+8. Only after those pass, compare the same GTA VI material-lighting scene in D24 and D16 modes and inspect frame captures.
 
 ### Acceptance tests
 
